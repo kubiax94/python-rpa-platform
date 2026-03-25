@@ -33,6 +33,7 @@ import pyee
 
 import logging
 
+from vm_agent.src.config.bootstrap_config import load_agent_runtime_config
 from vm_agent.src.telemetry.Itelemetry_provider import ITelemetryProvider
 from vm_agent.src.telemetry.windows_telemetry_provider import WindowsTelemetryProvider
 from vm_agent.src.utils.named_pipe_test import send_logon_command
@@ -56,6 +57,7 @@ class VmAgent(AgentBus):
         super().__init__()
         self._status: AgentSatus = AgentSatus.INITIALIZING
         self.enable = True
+        self._runtime_config = load_agent_runtime_config()
         #self._context: AgentContext = AgentContext()
         self._client: AgentClient = AgentClient()
         self._lifecycle: LifecycleManager = LifecycleManager(1)
@@ -83,8 +85,14 @@ class VmAgent(AgentBus):
 
     async def _async_run(self):
         try:
-    
-            self._client.start(self, {})            
+            connection_config = {
+                "url": self._runtime_config.get("server_url", "ws://192.168.1.10:8765/ws"),
+                "secret": self._runtime_config.get("secret"),
+                "bootstrap_token": self._runtime_config.get("bootstrap_token"),
+                "client_id": self._runtime_config.get("agent_id"),
+            }
+
+            self._client.start(self, connection_config)
             self._task_executor = TaskExecutor(self._client.send_event)
             await self._lifecycle.start()
 

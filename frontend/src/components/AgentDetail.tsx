@@ -7,10 +7,11 @@ import { getAgentConnection, getAgentSessions, getSessionProcessCount, isAgentOn
 import { ActiveTaskNotifications } from "./ActiveTaskNotifications";
 import { SessionPanel } from "@/components/SessionPanel";
 import { CommandPanel } from "./CommandPanel";
+import { GuacamolePanel } from "./GuacamolePanel";
 import { MonitoredView } from "./MonitoredView";
 import { OverviewPanel } from "./OverviewPanel";
 
-type AgentTab = "overview" | "processes" | "monitored" | "commands";
+type AgentTab = "overview" | "processes" | "monitored" | "remote" | "commands";
 
 interface AgentDetailProps {
   agentId: string;
@@ -97,6 +98,18 @@ export function AgentDetail({ agentId, state, tasks, sendCommand, latestScreensh
       ),
     },
     {
+      label: "Remote",
+      value: null,
+      sub: "guacamole bridge",
+      color: "cyan",
+      tab: "remote",
+      icon: (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 6.75A2.25 2.25 0 0 1 4.5 4.5h15A2.25 2.25 0 0 1 21.75 6.75v8.25a2.25 2.25 0 0 1-2.25 2.25h-4.19l.97 1.94a.75.75 0 0 1-.67 1.09H8.4a.75.75 0 0 1-.67-1.09l.97-1.94H4.5A2.25 2.25 0 0 1 2.25 15V6.75Z" />
+        </svg>
+      ),
+    },
+    {
       label: "Commands",
       value: null,
       sub: "send commands",
@@ -114,6 +127,7 @@ export function AgentDetail({ agentId, state, tasks, sendCommand, latestScreensh
     blue: { bg: "bg-blue-500/10", text: "text-blue-400", border: "border-blue-500/30" },
     emerald: { bg: "bg-emerald-500/10", text: "text-emerald-400", border: "border-emerald-500/30" },
     purple: { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
+    cyan: { bg: "bg-cyan-500/10", text: "text-cyan-300", border: "border-cyan-500/30" },
     amber: { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
   };
 
@@ -200,6 +214,10 @@ export function AgentDetail({ agentId, state, tasks, sendCommand, latestScreensh
 
       {activeTab === "monitored" && (
         <MonitoredView agentId={agentId} state={state} />
+      )}
+
+      {activeTab === "remote" && (
+        <GuacamolePanel agentId={agentId} />
       )}
 
       {activeTab === "commands" && (

@@ -1,9 +1,11 @@
 "use client";
 
+import { useState } from "react";
 import type { Task } from "@/hooks/useTaskAPI";
-import { isAgentOnline, type AgentsMap } from "@/types/agent";
+import { getAgentMetrics, isAgentOnline, type AgentsMap } from "@/types/agent";
 import { ActiveTaskNotifications } from "./ActiveTaskNotifications";
 import { AgentCard } from "./AgentCard";
+import { DeployAgentDialog } from "./DeployAgentDialog";
 
 interface AgentListProps {
   agents: AgentsMap;
@@ -16,12 +18,20 @@ interface AgentListProps {
 export function AgentList({ agents, connected, tasks, onSelectAgent, onOpenTaskTracker }: AgentListProps) {
   const agentIds = Object.keys(agents);
   const onlineCount = agentIds.filter((id) => isAgentOnline(agents[id])).length;
+  const [deployState, setDeployState] = useState<{ agentId?: string | null; hostname?: string | null; displayName?: string | null } | null>(null);
 
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-semibold text-slate-100">Agents</h1>
         <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setDeployState({})}
+            className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1.5 text-sm text-cyan-100 transition-colors hover:bg-cyan-500/20"
+          >
+            Prepare Deploy
+          </button>
           <ActiveTaskNotifications tasks={tasks} onOpenTasks={onOpenTaskTracker} />
           <span className="text-sm text-slate-500">
             {connected ? `${onlineCount}/${agentIds.length} online` : `${agentIds.length} cached`}
@@ -46,10 +56,26 @@ export function AgentList({ agents, connected, tasks, onSelectAgent, onOpenTaskT
               connected={connected}
               selected={false}
               onClick={() => onSelectAgent(id)}
+              onDeploy={() => {
+                const metrics = getAgentMetrics(agents[id]);
+                setDeployState({
+                  agentId: id,
+                  hostname: metrics?.hostname || id,
+                  displayName: metrics?.hostname || id,
+                });
+              }}
             />
           ))}
         </div>
       )}
+
+      <DeployAgentDialog
+        open={deployState !== null}
+        initialAgentId={deployState?.agentId}
+        initialHostname={deployState?.hostname}
+        initialDisplayName={deployState?.displayName}
+        onClose={() => setDeployState(null)}
+      />
     </div>
   );
 }

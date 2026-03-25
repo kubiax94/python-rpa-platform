@@ -1,6 +1,9 @@
 import asyncio
 import logging
+import os
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import uuid4
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,19 +11,25 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 import uvicorn
 
 from shared.network.events.example_event import CaptureProcessScreenshotEvent, CreateSessionEvent, ExecuteTaskEvent, ExecuteTaskData, CancelTaskEvent, CancelTaskData, HeartbeatData, SetWindowTrackingData, SetWindowTrackingEvent, StartMonitoredProcessEvent, StartProgramEvent
+from vm_agent_server.src.agent_registry_db import AgentRegistryDB
+from vm_agent_server.src.deployment_service import DeploymentService
 from vm_agent_server.src.network_event_handler import NetworkEventHandler
 from vm_agent_server.src.add_trust_rdp_host import add_trusted_rdp_host, disable_rdp_publisher_warning
 from vm_agent_server.src.agent_runtime import AgentRuntime, HEARTBEAT_TIMEOUT_SECONDS
+from vm_agent_server.src.guacamole_bridge import build_guacamole_session, get_guacamole_config
 from vm_agent_server.src.telemetry_db import TelemetryDB
 from vm_agent_server.src.task_db import TaskDB
 
 telemetry_db = TelemetryDB()
 task_db = TaskDB()
+registry_db = AgentRegistryDB()
 agent_runtime = AgentRuntime()
 frontend_snapshot_event = asyncio.Event()
 frontend_snapshot_broadcast_task: asyncio.Task | None = None
 heartbeat_watchdog_task: asyncio.Task | None = None
 logger = logging.getLogger(__name__)
+repo_root = Path(__file__).resolve().parents[2]
+deployment_service = DeploymentService(registry_db, repo_root)
 
 
 async def _frontend_snapshot_broadcaster():
@@ -53,6 +62,7 @@ async def lifespan(app):
     global frontend_snapshot_broadcast_task, heartbeat_watchdog_task
     await telemetry_db.start()
     await task_db.start()
+    await registry_db.start()
     frontend_snapshot_broadcast_task = asyncio.create_task(_frontend_snapshot_broadcaster())
     heartbeat_watchdog_task = asyncio.create_task(_heartbeat_watchdog())
     yield
@@ -70,6 +80,7 @@ async def lifespan(app):
             pass
     await task_db.stop()
     await telemetry_db.stop()
+    await registry_db.stop()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -102,11 +113,28 @@ async def websocket_endpoint(ws: WebSocket):
                         client_id = ev.data.client_id
                         logger.info("Handshake received from agent %s", client_id)
                         await agent_runtime.register_agent(client_id, ws)
+                        await registry_db.upsert_agent(
+                            client_id,
+                            status="registered",
+                            connection_status="online",
+                            last_seen_at=int(time.time()),
+                        )
                         if process_manager_watchers.get(client_id):
                             await _set_agent_window_tracking(client_id, True)
                         frontend_snapshot_event.set()
                     case "heartbeat":
                         agent_runtime.merge_heartbeat(ev.data, telemetry_db)
+                        metrics = ev.data.system_metrics if hasattr(ev.data, "system_metrics") else {}
+                        hostname = metrics.get("hostname", "") if isinstance(metrics, dict) else ""
+                        if client_id:
+                            await registry_db.upsert_agent(
+                                client_id,
+                                hostname=hostname,
+                                status="active",
+                                connection_status="online",
+                                metadata=metrics if isinstance(metrics, dict) else {},
+                                last_seen_at=int(time.time()),
+                            )
                         frontend_snapshot_event.set()
                     case "task_output":
                         task_db.append_log(
@@ -158,6 +186,8 @@ async def websocket_endpoint(ws: WebSocket):
     except Exception as e:
         logger.exception("Agent websocket error: %s", e)
     finally:
+        if client_id:
+            await registry_db.upsert_agent(client_id, status="registered", connection_status="offline", last_seen_at=int(time.time()))
         if await agent_runtime.unregister_agent(client_id, ws):
             frontend_snapshot_event.set()
 
@@ -422,6 +452,77 @@ async def api_agent_state(agent_id: str):
     if state is None:
         return JSONResponse({"error": "Not found"}, status_code=404)
     return JSONResponse(state)
+
+
+@app.get("/api/agent-registry")
+async def api_agent_registry(limit: int = Query(default=200, le=500)):
+    return JSONResponse(await registry_db.get_agents(limit))
+
+
+@app.get("/api/agent-registry/{agent_id}")
+async def api_agent_registry_item(agent_id: str):
+    item = await registry_db.get_agent(agent_id)
+    if not item:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return JSONResponse(item)
+
+
+def _resolve_agent_ws_url(request: Request) -> str:
+    override = os.getenv("VM_AGENT_SERVER_WS_URL")
+    if override:
+        return override
+    scheme = "wss" if request.url.scheme == "https" else "ws"
+    port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    return f"{scheme}://{request.url.hostname}:{port}/ws"
+
+
+@app.post("/api/deployments/prepare")
+async def api_prepare_deployment(request: Request):
+    body = await request.json()
+    hostname = (body.get("hostname") or "").strip()
+    if not hostname:
+        return JSONResponse({"error": "hostname is required"}, status_code=400)
+
+    agent_id = (body.get("agent_id") or hostname).strip()
+    display_name = (body.get("display_name") or hostname).strip()
+    source_ref = (body.get("source_ref") or "main").strip() or "main"
+    requested_by = (body.get("requested_by") or "user").strip() or "user"
+
+    deployment = await deployment_service.prepare_deployment(
+        agent_id=agent_id,
+        hostname=hostname,
+        display_name=display_name,
+        source_ref=source_ref,
+        requested_by=requested_by,
+        server_ws_url=_resolve_agent_ws_url(request),
+    )
+    return JSONResponse(deployment)
+
+
+@app.get("/api/deployments")
+async def api_list_deployments(agent_id: str = None, limit: int = Query(default=100, le=500)):
+    return JSONResponse(await registry_db.get_deployments(agent_id=agent_id, limit=limit))
+
+
+@app.get("/api/deployments/{deployment_id}")
+async def api_get_deployment(deployment_id: str):
+    deployment = await registry_db.get_deployment(deployment_id)
+    if not deployment:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return JSONResponse(deployment)
+
+
+@app.get("/api/guacamole/config")
+async def api_guacamole_config():
+    return JSONResponse(get_guacamole_config())
+
+
+@app.get("/api/agents/{agent_id}/guacamole")
+async def api_agent_guacamole(agent_id: str):
+    state = agent_runtime.get_agent_state(agent_id)
+    if state is None:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return JSONResponse(build_guacamole_session(agent_id, state))
 
 
 # ── Task REST API ──────────────────────────────────────────────────

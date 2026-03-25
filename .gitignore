@@ -40,10 +40,14 @@ frontend/*.tsbuildinfo
 *.local
 
 # Build and runtime artifacts
+artifacts/
 build/
 dist/
 logs/
 *.log
+agents.db
+agents.db-shm
+agents.db-wal
 tasks.db
 tasks.db-shm
 tasks.db-wal

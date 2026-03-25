@@ -1,6 +1,6 @@
 "use client";
 
-import { getAgentSessions, getSessionProcessCount, isAgentOnline, type AgentState } from "@/types/agent";
+import { getAgentMetrics, getAgentSessions, getSessionProcessCount, isAgentOnline, type AgentState } from "@/types/agent";
 
 interface AgentCardProps {
   agentId: string;
@@ -8,11 +8,13 @@ interface AgentCardProps {
   connected: boolean;
   selected: boolean;
   onClick: () => void;
+  onDeploy: () => void;
 }
 
-export function AgentCard({ agentId, state, connected, selected, onClick }: AgentCardProps) {
+export function AgentCard({ agentId, state, connected, selected, onClick, onDeploy }: AgentCardProps) {
   const sessions = getAgentSessions(state);
   const agentOnline = isAgentOnline(state);
+  const metrics = getAgentMetrics(state);
   const sessionCount = sessions.length;
   const processCount = sessions.reduce(
     (sum, [, session]) => sum + getSessionProcessCount(session),
@@ -38,6 +40,21 @@ export function AgentCard({ agentId, state, connected, selected, onClick }: Agen
         <span>{agentOnline ? "online" : connected ? "offline" : "cached"}</span>
         <span>{sessionCount} session{sessionCount !== 1 ? "s" : ""}</span>
         <span>{processCount} process{processCount !== 1 ? "es" : ""}</span>
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-3 border-t border-slate-700/70 pt-3">
+        <span className="truncate text-xs text-slate-500" title={metrics?.hostname || undefined}>
+          {metrics?.hostname || "hostname unknown"}
+        </span>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDeploy();
+          }}
+          className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1 text-xs font-medium text-cyan-200 hover:bg-cyan-500/20"
+        >
+          Deploy
+        </button>
       </div>
     </button>
   );

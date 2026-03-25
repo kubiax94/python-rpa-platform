@@ -29,6 +29,10 @@ class AgentClient(IProcesable, IEventAware):
             logging.warning("AgentClient.start() called while connection manager is already running")
             return
 
+        configured_client_id = config.get("client_id") if isinstance(config, dict) else None
+        if configured_client_id:
+            self.client_id = configured_client_id
+
         self._connection = AgentConnection(config=config)
         self._handler = NetworkEventHandler(bus)
 

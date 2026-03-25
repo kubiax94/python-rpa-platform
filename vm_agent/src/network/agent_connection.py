@@ -26,6 +26,7 @@ class AgentConnection(IConnection):
         self.url = config.get("url", "ws://192.168.1.10:8765/ws")
         self._status: AgentConnectionStatus = AgentConnectionStatus.INIT
         self.secret = config.get("secret")
+        self.bootstrap_token = config.get("bootstrap_token")
         self._ws : ClientConnection = None
         #Task for main msg loop from server
         self._read_loop_task: asyncio.Task = None
@@ -55,7 +56,8 @@ class AgentConnection(IConnection):
     # rest logic can be custom.
     async def open(self, client: IProcesable):  
         try:
-            headers = NetHeaders.add_bearer_auth_header(self.secret)
+            auth_secret = self.secret or self.bootstrap_token
+            headers = NetHeaders.add_bearer_auth_header(auth_secret) if auth_secret else None
 
             if(self._ws and self._status == AgentConnectionStatus.CONNECTED):
                 logging.debug(f"WebSocket connection to {self.url} already established")
@@ -66,7 +68,10 @@ class AgentConnection(IConnection):
             
             self._status = AgentConnectionStatus.CONNECTING
             logging.info(f"Connecting to {self.url}...")
-            self._ws = await connect(self.url)
+            additional_headers = None
+            if headers and headers.authorization:
+                additional_headers = {"Authorization": headers.authorization}
+            self._ws = await connect(self.url, additional_headers=additional_headers)
             self.client = client
             self._status = AgentConnectionStatus.CONNECTED
 

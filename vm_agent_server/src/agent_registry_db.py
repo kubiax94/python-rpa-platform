@@ -1,0 +1,297 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import time
+from typing import Any, Optional
+
+import aiosqlite
+
+logger = logging.getLogger(__name__)
+
+AGENT_REGISTRY_DB_PATH = "agents.db"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS agents (
+    id                  TEXT PRIMARY KEY,
+    hostname            TEXT NOT NULL DEFAULT '',
+    display_name        TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'registered',
+    connection_status   TEXT NOT NULL DEFAULT 'offline',
+    current_version     TEXT NOT NULL DEFAULT '',
+    last_deployment_id  TEXT,
+    metadata_json       TEXT NOT NULL DEFAULT '{}',
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    last_seen_at        INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_hostname ON agents(hostname);
+CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status, connection_status);
+
+CREATE TABLE IF NOT EXISTS agent_credentials (
+    agent_id                TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    bootstrap_token_hash    TEXT,
+    bootstrap_expires_at    INTEGER,
+    bootstrap_used_at       INTEGER,
+    secret_hash             TEXT,
+    secret_rotated_at       INTEGER,
+    updated_at              INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_deployments (
+    id                  TEXT PRIMARY KEY,
+    agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    hostname            TEXT NOT NULL,
+    source_ref          TEXT NOT NULL DEFAULT 'main',
+    requested_by        TEXT NOT NULL DEFAULT 'user',
+    status              TEXT NOT NULL DEFAULT 'queued',
+    commit_sha          TEXT NOT NULL DEFAULT '',
+    artifact_dir        TEXT NOT NULL DEFAULT '',
+    artifact_exe_path   TEXT NOT NULL DEFAULT '',
+    bootstrap_path      TEXT NOT NULL DEFAULT '',
+    install_script_path TEXT NOT NULL DEFAULT '',
+    error               TEXT,
+    build_log           TEXT NOT NULL DEFAULT '',
+    created_at          INTEGER NOT NULL,
+    started_at          INTEGER,
+    completed_at        INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_deployments_agent ON agent_deployments(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deployments_status ON agent_deployments(status, created_at DESC);
+"""
+
+
+def _serialize_metadata(metadata: dict[str, Any] | None) -> str:
+    return json.dumps(metadata or {}, ensure_ascii=True)
+
+
+def _deserialize_metadata(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def hash_token(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+class AgentRegistryDB:
+    def __init__(self, db_path: str = AGENT_REGISTRY_DB_PATH):
+        self._db_path = db_path
+        self._db: Optional[aiosqlite.Connection] = None
+
+    async def start(self):
+        self._db = await aiosqlite.connect(self._db_path)
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
+        await self._db.execute("PRAGMA foreign_keys=ON")
+        await self._db.executescript(SCHEMA)
+        await self._db.commit()
+        logger.info("AgentRegistryDB started: %s", self._db_path)
+
+    async def stop(self):
+        if self._db:
+            await self._db.close()
+        logger.info("AgentRegistryDB stopped")
+
+    async def upsert_agent(
+        self,
+        agent_id: str,
+        hostname: str = "",
+        display_name: str = "",
+        *,
+        status: str | None = None,
+        connection_status: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        last_seen_at: int | None = None,
+        current_version: str | None = None,
+        last_deployment_id: str | None = None,
+    ):
+        if not self._db:
+            return
+
+        now = int(time.time())
+        existing = await self.get_agent(agent_id)
+
+        merged_hostname = hostname or (existing.get("hostname", "") if existing else "")
+        merged_display_name = display_name or (existing.get("display_name", "") if existing else "")
+        merged_status = status or (existing.get("status", "registered") if existing else "registered")
+        merged_connection = connection_status or (existing.get("connection_status", "offline") if existing else "offline")
+        merged_version = current_version or (existing.get("current_version", "") if existing else "")
+        merged_last_deployment = last_deployment_id or (existing.get("last_deployment_id") if existing else None)
+        merged_last_seen = last_seen_at if last_seen_at is not None else (existing.get("last_seen_at") if existing else None)
+        merged_metadata = metadata or (existing.get("metadata") if existing else {})
+
+        await self._db.execute(
+            """
+            INSERT INTO agents (id, hostname, display_name, status, connection_status, current_version, last_deployment_id, metadata_json, created_at, updated_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                hostname = excluded.hostname,
+                display_name = excluded.display_name,
+                status = excluded.status,
+                connection_status = excluded.connection_status,
+                current_version = excluded.current_version,
+                last_deployment_id = excluded.last_deployment_id,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at,
+                last_seen_at = excluded.last_seen_at
+            """,
+            (
+                agent_id,
+                merged_hostname,
+                merged_display_name,
+                merged_status,
+                merged_connection,
+                merged_version,
+                merged_last_deployment,
+                _serialize_metadata(merged_metadata),
+                existing.get("created_at", now) if existing else now,
+                now,
+                merged_last_seen,
+            ),
+        )
+        await self._db.commit()
+
+    async def set_bootstrap_token(self, agent_id: str, token_hash: str, expires_at: int):
+        if not self._db:
+            return
+
+        now = int(time.time())
+        await self._db.execute(
+            """
+            INSERT INTO agent_credentials (agent_id, bootstrap_token_hash, bootstrap_expires_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(agent_id) DO UPDATE SET
+                bootstrap_token_hash = excluded.bootstrap_token_hash,
+                bootstrap_expires_at = excluded.bootstrap_expires_at,
+                bootstrap_used_at = NULL,
+                updated_at = excluded.updated_at
+            """,
+            (agent_id, token_hash, expires_at, now),
+        )
+        await self._db.commit()
+
+    async def create_deployment(
+        self,
+        deployment_id: str,
+        agent_id: str,
+        hostname: str,
+        source_ref: str,
+        requested_by: str,
+    ):
+        if not self._db:
+            return
+
+        now = int(time.time())
+        await self._db.execute(
+            """
+            INSERT INTO agent_deployments (id, agent_id, hostname, source_ref, requested_by, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'queued', ?)
+            """,
+            (deployment_id, agent_id, hostname, source_ref, requested_by, now),
+        )
+        await self._db.commit()
+        await self.upsert_agent(agent_id, hostname=hostname, last_deployment_id=deployment_id)
+
+    async def update_deployment(
+        self,
+        deployment_id: str,
+        *,
+        status: str | None = None,
+        commit_sha: str | None = None,
+        artifact_dir: str | None = None,
+        artifact_exe_path: str | None = None,
+        bootstrap_path: str | None = None,
+        install_script_path: str | None = None,
+        error: str | None = None,
+        build_log: str | None = None,
+        started_at: int | None = None,
+        completed_at: int | None = None,
+    ):
+        if not self._db:
+            return
+
+        fields: list[str] = []
+        params: list[Any] = []
+        for name, value in (
+            ("status", status),
+            ("commit_sha", commit_sha),
+            ("artifact_dir", artifact_dir),
+            ("artifact_exe_path", artifact_exe_path),
+            ("bootstrap_path", bootstrap_path),
+            ("install_script_path", install_script_path),
+            ("error", error),
+            ("build_log", build_log),
+            ("started_at", started_at),
+            ("completed_at", completed_at),
+        ):
+            if value is not None:
+                fields.append(f"{name} = ?")
+                params.append(value)
+
+        if not fields:
+            return
+
+        params.append(deployment_id)
+        await self._db.execute(f"UPDATE agent_deployments SET {', '.join(fields)} WHERE id = ?", params)
+        await self._db.commit()
+
+    async def get_agent(self, agent_id: str) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+        async with self._db.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            columns = [d[0] for d in cursor.description]
+            result = dict(zip(columns, row))
+            result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+            return result
+
+    async def get_agents(self, limit: int = 200) -> list[dict[str, Any]]:
+        if not self._db:
+            return []
+        rows: list[dict[str, Any]] = []
+        async with self._db.execute("SELECT * FROM agents ORDER BY updated_at DESC LIMIT ?", (limit,)) as cursor:
+            columns = [d[0] for d in cursor.description]
+            async for row in cursor:
+                result = dict(zip(columns, row))
+                result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+                rows.append(result)
+        return rows
+
+    async def get_deployment(self, deployment_id: str) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+        async with self._db.execute("SELECT * FROM agent_deployments WHERE id = ?", (deployment_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            columns = [d[0] for d in cursor.description]
+            return dict(zip(columns, row))
+
+    async def get_deployments(self, agent_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if not self._db:
+            return []
+        query = "SELECT * FROM agent_deployments WHERE 1=1"
+        params: list[Any] = []
+        if agent_id:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows: list[dict[str, Any]] = []
+        async with self._db.execute(query, params) as cursor:
+            columns = [d[0] for d in cursor.description]
+            async for row in cursor:
+                rows.append(dict(zip(columns, row)))
+        return rows
