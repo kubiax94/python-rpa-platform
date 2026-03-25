@@ -1,0 +1,5 @@
+pyee
+pydantic
+pywin32
+websockets
+Pillow

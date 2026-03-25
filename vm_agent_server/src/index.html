@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>VM Agent Debugger</title>
+    <style>
+        :root { --bg: #1a1a1a; --card: #2d2d2d; --text: #e0e0e0; --accent: #00d4ff; --monitored: #4caf50; --error: #f44336; }
+        body { font-family: 'Segoe UI', Tahoma, sans-serif; background: var(--bg); color: var(--text); margin: 20px; }
+        .agent-card { background: var(--card); border-left: 5px solid var(--accent); padding: 15px; margin-bottom: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        .session-block { margin-left: 20px; border-bottom: 1px solid #444; padding: 10px 0; }
+        .session-header { color: var(--accent); font-size: 1.2em; font-weight: bold; }
+        
+        table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 0.9em; }
+        th { text-align: left; background: #1a1a1a; color: #fc6; padding: 8px; }
+        td { padding: 6px 8px; border-bottom: 1px solid #3d3d3d; }
+        
+        .badge { padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }
+        .status-running { background: var(--monitored); color: #fff; }
+        .status-down { background: var(--error); color: #fff; }
+        .monitored-row { background: rgba(76, 175, 80, 0.1); border-left: 3px solid var(--monitored); }
+        
+        .section-title { font-size: 0.9em; text-transform: uppercase; color: #888; margin-top: 15px; letter-spacing: 1px; }
+        button { cursor: pointer; background: #444; color: #fff; border: none; padding: 5px 10px; border-radius: 4px; transition: 0.2s; }
+        button:hover { background: #666; }
+    </style>
+</head>
+<body>
+    <h2>VM Agent Dashboard</h2>
+    <div id="stats"></div>
+
+    <script>
+    const ws = new WebSocket(`ws://192.168.1.10:8765/frontend`);
+    const openTables = new Set();
+    let latestData = {};
+
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        latestData = data;  
+        updateAgentList(data);
+        const statsDiv = document.getElementById("stats");
+        statsDiv.innerHTML = "";
+
+        if (!data || Object.keys(data).length === 0) {
+            statsDiv.innerText = "Oczekiwanie na dane z agentów...";
+            return;
+        }
+
+        // Iterujemy po Agentach (np. test_agent)
+        for (const [agentId, sessions] of Object.entries(data)) {
+            const agentCard = document.createElement("div");
+            agentCard.className = "agent-card";
+            agentCard.innerHTML = `<div style="margin-bottom:10px;"><strong>🤖 AGENT:</strong> <span style="color:#00d4ff">${agentId}</span></div>`;
+
+            // Iterujemy po Sesjach (np. jonko, test1, DESKTOP-JJULF7D-None)
+            for (const [sessionKey, sessionData] of Object.entries(sessions)) {
+                if (!sessionData || typeof sessionData !== 'object') continue;
+
+                // Pobieramy procesy - zamieniamy obiekt na tablicę
+                const procs = sessionData.processes ? Object.values(sessionData.processes) : [];
+                
+                // Rozdzielamy na Monitored i Background
+                const monitored = procs.filter(p => p.is_monitored === true);
+                const background = procs.filter(p => !p.is_monitored);
+
+                const sessionEl = document.createElement("div");
+                sessionEl.className = "session-block";
+
+                // Budujemy HTML sesji
+                sessionEl.innerHTML = `
+                    <div class="session-header">
+                        ${sessionKey} 
+                        <span class="badge ${sessionData.status === 'Active' ? 'status-running' : 'status-down'}">
+                            ${sessionData.status || 'Unknown'}
+                        </span>
+                    </div>
+                    <div style="font-size: 0.85em; opacity: 0.8; margin-bottom: 10px;">
+                        👤 User: ${sessionData.username || 'N/A'} | 🔢 PIDs: ${sessionData.process_count || procs.length} | 🆔 ID: ${sessionData.session_id}
+                    </div>
+                    
+                    <div class="section-title" style="color:#4caf50">⭐ Monitored Apps (${monitored.length})</div>
+                    ${renderTable(monitored, true)}
+
+                    <div class="section-title">⚙️ Background Processes (${background.length})</div>
+                    <button onclick="toggleTable('${agentId}-${sessionKey}-bg')">
+                        ${openTables.has(`${agentId}-${sessionKey}-bg`) ? 'Ukryj' : 'Pokaż'} procesy systemowe
+                    </button>
+                    <div id="${agentId}-${sessionKey}-bg" style="display:${openTables.has(`${agentId}-${sessionKey}-bg`) ? 'block' : 'none'}">
+                        ${renderTable(background, false)}
+                    </div>
+                `;
+                agentCard.appendChild(sessionEl);
+            }
+            statsDiv.appendChild(agentCard);
+        }
+    };
+
+    // Funkcja pomocnicza do budowania tabeli
+    function renderTable(procs, isMonitored) {
+        if (procs.length === 0) return "<p style='color:#666; font-size:0.8em; margin-left:10px;'>Brak procesów do wyświetlenia</p>";
+        
+        return `
+            <table>
+                <thead>
+                    <tr>
+                        <th>EXE</th>
+                        <th>PID</th>
+                        <th>RAM</th>
+                        <th>CPU</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${procs.map(p => {
+                        const ram = p.memory_usage ? (p.memory_usage.working_set_size / 1024 / 1024).toFixed(1) + " MB" : "N/A";
+                        const cpu = typeof p.cpu_usage === 'number' ? p.cpu_usage.toFixed(2) + "%" : "0%";
+                        const statusColor = p.is_running !== false ? '#4caf50' : '#f44336';
+                        
+                        return `
+                            <tr class="${isMonitored ? 'monitored-row' : ''}">
+                                <td title="${p.args || ''}">${p.exe || 'unknown'}</td>
+                                <td>${p.pid}</td>
+                                <td>${ram}</td>
+                                <td>${cpu}</td>
+                                <td><span style="color:${statusColor}">${p.is_running !== false ? '● LIVE' : '○ DEAD'}</span></td>
+                            </tr>
+                        `;
+                    }).join("")}
+                </tbody>
+            </table>
+        `;
+    }
+
+    function toggleTable(id) {
+        const el = document.getElementById(id);
+        const btn = el.previousElementSibling;
+        if (el.style.display === "none") {
+            el.style.display = "block";
+            btn.innerText = "Ukryj procesy systemowe";
+            openTables.add(id);
+        } else {
+            el.style.display = "none";
+            btn.innerText = "Pokaż procesy systemowe";
+            openTables.delete(id);
+        }
+    }
+</script>
+
+<!-- Dodaj do <body> -->
+<div style="margin-bottom:20px;">
+    <h3>Wyślij event do agenta</h3>
+    <form id="startProgramForm" onsubmit="sendStartProgram(event)">
+        <select id="agentSelect" required>
+            <option value="">Wybierz agenta</option>
+        </select>
+        <select id="sessionSelect" required>
+            <option value="">Wybierz sesję</option>
+        </select>
+        <input type="text" id="exePath" placeholder="Ścieżka do EXE" required>
+        <input type="text" id="exeArgs" placeholder="Argumenty">
+        <input type="checkbox" id="monitoredCheckbox"> Uruchom jako monitorowany proces
+        <button type="submit">Uruchom program</button>
+    </form>
+</div>
+
+<div style="margin-bottom:20px;">
+    <h3>Zaloguj się do agenta</h3>
+    <form id="loginForm" onsubmit="sendLogin(event)">
+        <input type="text" id="loginUser" placeholder="Nazwa użytkownika" required>
+        <input type="password" id="loginPass" placeholder="Hasło" required>
+        <input type="text" id="loginDomain" placeholder="Domena" required>
+        <button type="submit">Zaloguj</button>
+    </form>
+    <div id="loginStatus" style="margin-top:8px; color:#f44336;"></div>
+</div>
+
+<script>
+
+function updateAgentList(data) {
+    const agentSelect = document.getElementById("agentSelect");
+    const prevAgent = agentSelect.value;
+    agentSelect.innerHTML = `<option value="">Wybierz agenta</option>`;
+    Object.keys(data).forEach(agentId => {
+        agentSelect.innerHTML += `<option value="${agentId}">${agentId}</option>`;
+    });
+    agentSelect.value = prevAgent;
+    updateSessionList();
+}
+
+function sendLogin(e) {
+    e.preventDefault();
+    const agentId = document.getElementById("agentSelect").value;
+    const user = document.getElementById("loginUser").value;
+    const pass = document.getElementById("loginPass").value;
+    const domain = document.getElementById("loginDomain").value;
+
+    const event = {
+        type: "create_session",
+        data: {
+            agent_id: agentId,
+            username: user,
+            password: pass,
+            domain: domain
+
+        }
+    };
+    ws.send(JSON.stringify(event));
+    document.getElementById("loginStatus").innerText = "Wysyłanie...";
+}
+
+document.getElementById("agentSelect").addEventListener("change", updateSessionList);
+
+function updateSessionList() {
+    const agentId = document.getElementById("agentSelect").value;
+    const sessionSelect = document.getElementById("sessionSelect");
+    sessionSelect.innerHTML = `<option value="">Wybierz sesję</option>`;
+    if (agentId && latestData[agentId]) {
+        Object.keys(latestData[agentId]).forEach(sessionKey => {
+            sessionSelect.innerHTML += `<option value="${sessionKey}">${sessionKey}</option>`;
+        });
+    }
+}
+function sendStartProgram(e) {
+    e.preventDefault();
+    const agentId = document.getElementById("agentSelect").value;
+    const session = document.getElementById("sessionSelect").value;
+    const exe = document.getElementById("exePath").value;
+    const args = document.getElementById("exeArgs").value;
+    const monitored = document.getElementById("monitoredCheckbox").checked;
+    if (!agentId || !session) {
+        alert("Wybierz agenta i sesję!");
+        return;
+    }
+    
+    const event = {
+        type: monitored ? "start_monitored_process" : "start_program",
+        data: {
+            agent_id: agentId,
+            session: session,
+            exe: exe ? exe.split("/").pop() : "",
+            args: args ? args :  "",
+            cwd: "",
+            visible: true
+        }
+    };
+    ws.send(JSON.stringify(event));
+}
+
+</script>
+</body>
+</html>

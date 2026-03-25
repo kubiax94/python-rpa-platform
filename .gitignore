@@ -1,0 +1,61 @@
+# OS and editor files
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+.vs/
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Python packaging metadata
+*.egg-info/
+pip-wheel-metadata/
+
+# Node and Next.js artifacts
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/coverage/
+frontend/.vercel/
+frontend/*.tsbuildinfo
+
+# Environment and local config
+.env
+.env.*
+*.local
+
+# Build and runtime artifacts
+build/
+dist/
+logs/
+*.log
+tasks.db
+tasks.db-shm
+tasks.db-wal
+telemetry.db
+telemetry.db-shm
+telemetry.db-wal
+
+# Windows and Visual Studio generated files
+*.user
+*.aps
+
+# Generated sample build outputs
+microsoft Windows-classic-samples main Samples-CredentialProvider_cpp/Release/
+microsoft Windows-classic-samples main Samples-CredentialProvider_cpp/x64/
+microsoft Windows-classic-samples main Samples-CredentialProvider_cpp/SampleV2.98E74D71/

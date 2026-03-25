@@ -1,0 +1,2 @@
+class UserLogoutException(Exception):
+    pass

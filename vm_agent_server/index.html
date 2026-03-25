@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>Status agentów (live)</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #222; color: #eee; }
+        h2 { color: #6cf; }
+        table { border-collapse: collapse; margin-bottom: 2em; width: 100%; background: #333; }
+        th, td { border: 1px solid #444; padding: 6px 10px; text-align: left; }
+        th { background: #222; color: #fc6; }
+        .session { margin-bottom: 2em; }
+        .user { color: #6cf; font-weight: bold; }
+        .host { color: #fc6; }
+        .proc-table { margin-top: 0.5em; }
+        .proc-table th, .proc-table td { font-size: 0.95em; }
+    </style>
+</head>
+<body>
+    <h2>Status agentów (live)</h2>
+    <div id="stats"></div>
+    <script>
+        const ws = new WebSocket("ws://localhost:8765/frontend");
+        const openTables = new Set();
+        ws.onmessage = (event) => {
+            console.log("Received from server:", event.data);
+            const data = JSON.parse(event.data);
+            const statsDiv = document.getElementById("stats");
+            statsDiv.innerHTML = "";
+            if (!data) {
+                statsDiv.innerText = "Brak danych";
+                return;
+            }
+            for (const [user, userData] of Object.entries(data)) {
+                statsDiv.innerHTML += `<div class="session">
+                    <span class="user">${user}</span> (session_id: ${userData.session_id}, type: ${userData.type}, process_count: ${userData.process_count})<br>`;
+                for (const [sessionKey, sessionData] of Object.entries(userData)) {
+                    if (!sessionData.processes) continue;
+                    const procTableId = `proc-table-${user}-${sessionKey}`;
+                    statsDiv.innerHTML += `<div class="host"><b>${sessionKey}</b> (${sessionData.status})<br>
+                        <b>Username:</b> ${sessionData.username}<br>
+                        <b>Session ID:</b> ${sessionData.session_id}<br>
+                        <b>Procesów:</b> ${sessionData.process_count}
+                        ${Object.keys(sessionData.processes).length > 0 ? `
+                        <button onclick="toggleProcTable('${procTableId}')">Pokaż/Ukryj procesy</button>
+                        <div id="${procTableId}" style="display:none;">
+                        <table class="proc-table">
+                            <tr>
+                                <th>Nazwa</th>
+                                <th>PID</th>
+                                <th>RAM (MB)</th>
+                                <th>CPU (ticks)</th>
+                                <th>Widoczny</th>
+                                <th>Status</th>
+                            </tr>
+${Object.values(sessionData.processes).map(proc => {
+    // RAM w MB
+    let ramMB = 0;
+    if (proc.memory_usage && typeof proc.memory_usage.working_set_size === "number") {
+        ramMB = proc.memory_usage.working_set_size / 1024 / 1024;
+    }
+    return `
+        <tr>
+            <td>${proc.exe}</td>
+            <td>${proc.pid}</td>
+            <td>${ramMB.toFixed(2)}</td>
+            <td>${proc.cpu_usage}</td>
+            <td>${proc.visible ? "✔️" : "❌"}</td>
+            <td>${proc.is_running ? "🟢" : "🔴"}</td>
+        </tr>
+    `;
+}).join("")}
+                        </table>
+                        </div>` : ""}
+                    </div>`;
+                }
+                statsDiv.innerHTML += "</div>";
+            }
+                for (const id of openTables) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = "block";
+}
+        };
+
+function toggleProcTable(id) {
+    const el = document.getElementById(id);
+    if (el) {
+        if (el.style.display === "none") {
+            el.style.display = "block";
+            openTables.add(id);
+        } else {
+            el.style.display = "none";
+            openTables.delete(id);
+        }
+    }
+}
+    </script>
+</body>
+</html>

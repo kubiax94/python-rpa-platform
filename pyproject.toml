@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vm_agent"
+version = "0.1.0"
+dependencies = [
+    "pyee>=13.0.0",
+    "pydantic>=2.0",
+    "websockets>=15.0",
+    "pywin32>=311",
+    "Pillow>=10.0",
+]
+
+[tool.setuptools]
+packages = ["vm_agent", "shared", "vm_agent_server"]
