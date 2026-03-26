@@ -15,7 +15,7 @@ import win32con
 import win32event
 import win32ts
 
-from shared.network.events.example_event import CancelTaskData, CreateSessionData, CreateSessionEvent, ExecuteTaskData, ExecuteTaskEvent, CancelTaskEvent, CaptureProcessScreenshotData, CaptureProcessScreenshotEvent, HandshakeData, HandshakeEvent, HeartbeatData, HeartbeatEvent, ProcessScreenshotData, ProcessScreenshotEvent, SessionCreatedData, SessionCreatedEvent, SessionCreationFailedData, SessionCreationFailedEvent, SetWindowTrackingData, SetWindowTrackingEvent, StartMonitoredProcessEvent, StartProgramData, StartProgramEvent, TaskStatusData, TaskStatusEvent
+from shared.network.events.example_event import AuthResultData, AuthResultEvent, CancelTaskData, CreateSessionData, CreateSessionEvent, ExecuteTaskData, ExecuteTaskEvent, CancelTaskEvent, CaptureProcessScreenshotData, CaptureProcessScreenshotEvent, HandshakeData, HandshakeEvent, HeartbeatData, HeartbeatEvent, ProcessScreenshotData, ProcessScreenshotEvent, SessionCreatedData, SessionCreatedEvent, SessionCreationFailedData, SessionCreationFailedEvent, SetWindowTrackingData, SetWindowTrackingEvent, StartMonitoredProcessEvent, StartProgramData, StartProgramEvent, TaskStatusData, TaskStatusEvent
 from vm_agent.src.core.abstract_proces import AbstractProcess
 #from vm_agent.src.core.agent_context import AgentContext
 from vm_agent.src.core.agent_bus import AgentBus
@@ -33,7 +33,7 @@ import pyee
 
 import logging
 
-from vm_agent.src.config.bootstrap_config import load_agent_runtime_config
+from vm_agent.src.config.bootstrap_config import load_agent_runtime_config, persist_agent_runtime_config
 from vm_agent.src.telemetry.Itelemetry_provider import ITelemetryProvider
 from vm_agent.src.telemetry.windows_telemetry_provider import WindowsTelemetryProvider
 from vm_agent.src.utils.named_pipe_test import send_logon_command
@@ -73,6 +73,7 @@ class VmAgent(AgentBus):
 
     def run(self):
         logging.info("VmAgent.run() START")
+        AuthResultEvent().register_listener(self, self._handle_auth_result, once=False)
         StartProgramEvent().register_listener(self, self._start_process, once=False)
         StartMonitoredProcessEvent().register_listener(self, self._start_monitored_process, once=False)
         CreateSessionEvent().register_listener(self, self._login_user_session, once=False)
@@ -100,6 +101,11 @@ class VmAgent(AgentBus):
             logging.info("VmAgent started and running")
 
             while self._status == AgentSatus.RUNNING:
+                fatal_error_reason = self._client.get_fatal_error_reason()
+                if fatal_error_reason:
+                    self._status = AgentSatus.ERROR
+                    logging.error(f"Stopping agent main loop due to fatal connection error: {fatal_error_reason}")
+                    break
                 
                 if(self._time_started % 10 == 0):
                     self._event_viewer.scan()
@@ -163,6 +169,25 @@ class VmAgent(AgentBus):
                 self.heartbeat(sync=True)
             except Exception as exc:
                 logging.debug(f"Failed to perform initial window refresh after enabling tracking: {exc}")
+
+    def _handle_auth_result(self, eventData: AuthResultData):
+        if eventData.status != "ok":
+            reason = eventData.reason or "unknown error"
+            logging.error(f"Agent authentication failed: {reason}")
+            if reason in ("bootstrap token expired", "bootstrap token already used", "invalid bearer token", "missing bearer token"):
+                logging.error("Deployment bootstrap credentials are no longer valid. Prepare a new deployment package for this agent.")
+            self._client.stop(reason)
+            self._status = AgentSatus.ERROR
+            return
+
+        if not eventData.secret:
+            return
+
+        self._runtime_config["secret"] = eventData.secret
+        self._runtime_config.pop("bootstrap_token", None)
+        persist_agent_runtime_config(self._runtime_config)
+        self._client.update_credentials(secret=eventData.secret, bootstrap_token=None)
+        logging.info("Persisted issued agent secret for %s", eventData.agent_id or self._client.client_id)
     
     def _start_process(self, eventData: StartProgramData):
         logging.info(f"Starting process with event data: {eventData}")

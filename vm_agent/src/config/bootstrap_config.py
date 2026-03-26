@@ -16,6 +16,10 @@ def _candidate_paths() -> list[Path]:
     return candidates
 
 
+def get_agent_runtime_config_path() -> Path:
+    return _candidate_paths()[0]
+
+
 def load_agent_runtime_config() -> dict[str, Any]:
     payload: dict[str, Any] = {}
 
@@ -42,3 +46,9 @@ def load_agent_runtime_config() -> dict[str, Any]:
         payload["agent_id"] = os.getenv("VM_AGENT_ID")
 
     return payload
+
+
+def persist_agent_runtime_config(payload: dict[str, Any]):
+    target_path = get_agent_runtime_config_path()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

@@ -2,7 +2,7 @@
 import logging
 from typing import override
 from shared.core.event_handler import EventHandler
-from shared.network.events.example_event import CancelTaskData, CaptureProcessScreenshotData, CreateSessionData, CreateSessionEvent, ExecuteTaskData, HandshakeData, SetWindowTrackingData, StartProgramData
+from shared.network.events.example_event import AuthResultData, CancelTaskData, CaptureProcessScreenshotData, CreateSessionData, CreateSessionEvent, ExecuteTaskData, HandshakeData, SetWindowTrackingData, StartProgramData
 from shared.network.iconnection import IConnection
 from shared.protocol.network_event import NetworkEvent
 
@@ -26,6 +26,10 @@ class NetworkEventHandler(EventHandler):
 
             case "handshake":
                 self._bus.emit(event.type, HandshakeData(**event.data))
+
+            case "auth_result":
+                logging.info(f"Auth result event received: {event.data}")
+                self._bus.emit(event.type, AuthResultData(**event.data))
 
             case "start_program":
                 logging.info(f"Start program event received: {event.data}")

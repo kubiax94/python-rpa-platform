@@ -27,6 +27,7 @@ class AgentConnection(IConnection):
         self._status: AgentConnectionStatus = AgentConnectionStatus.INIT
         self.secret = config.get("secret")
         self.bootstrap_token = config.get("bootstrap_token")
+        self.fatal_error_reason: str | None = None
         self._ws : ClientConnection = None
         #Task for main msg loop from server
         self._read_loop_task: asyncio.Task = None
@@ -48,6 +49,17 @@ class AgentConnection(IConnection):
             except asyncio.CancelledError:
                 pass
             self._read_loop_task = None
+
+    def update_credentials(self, *, secret: str | None = None, bootstrap_token: str | None = None):
+        self.secret = secret
+        self.bootstrap_token = bootstrap_token
+
+    def stop(self, reason: str | None = None):
+        self.fatal_error_reason = reason
+        self._status = AgentConnectionStatus.STOP
+
+    def get_fatal_error_reason(self) -> str | None:
+        return self.fatal_error_reason
 
     def get_status(self) -> AgentConnectionStatus:
         return self._status
@@ -143,8 +155,13 @@ class AgentConnection(IConnection):
                     except Exception as e:
                         logging.error(f"Client processing error: {e}")
         except ConnectionClosedError as e:
+            close_code = getattr(e, "code", None) or getattr(getattr(e, "rcvd", None), "code", None)
+            close_reason = getattr(e, "reason", None) or getattr(getattr(e, "rcvd", None), "reason", None) or str(e)
             logging.warning(f"Connection closed: {e}")
-            self._status = AgentConnectionStatus.ERROR
+            if close_code == 4401:
+                self.stop(close_reason or "authentication failed")
+            else:
+                self._status = AgentConnectionStatus.ERROR
             #await self.reconnect()                    
         except asyncio.CancelledError:
             pass

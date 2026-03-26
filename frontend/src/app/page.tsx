@@ -7,6 +7,7 @@ import { useTasks } from "@/hooks/useTaskAPI";
 import { Sidebar, type MenuPage } from "@/components/Sidebar";
 import { AgentList } from "@/components/AgentList";
 import { AgentDetail } from "@/components/AgentDetail";
+import { DeploymentsPage } from "@/components/DeploymentsPage";
 import { TasksPage } from "@/components/TasksPage";
 import { SettingsPage } from "@/components/SettingsPage";
 
@@ -109,6 +110,7 @@ export default function Dashboard() {
         {activePage === "tasks" && (
           <TasksPage onOpenTaskProcess={handleOpenTaskProcess} entryMode={tasksEntryMode} agentFilterId={taskAgentFilter} />
         )}
+        {activePage === "deployments" && <DeploymentsPage />}
         {activePage === "settings" && <SettingsPage />}
       </main>
     </div>

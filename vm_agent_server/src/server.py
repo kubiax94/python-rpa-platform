@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 import uvicorn
 
-from shared.network.events.example_event import CaptureProcessScreenshotEvent, CreateSessionEvent, ExecuteTaskEvent, ExecuteTaskData, CancelTaskEvent, CancelTaskData, HeartbeatData, SetWindowTrackingData, SetWindowTrackingEvent, StartMonitoredProcessEvent, StartProgramEvent
+from shared.network.events.example_event import AuthResultData, AuthResultEvent, CaptureProcessScreenshotEvent, CreateSessionEvent, ExecuteTaskEvent, ExecuteTaskData, CancelTaskEvent, CancelTaskData, HeartbeatData, SetWindowTrackingData, SetWindowTrackingEvent, StartMonitoredProcessEvent, StartProgramEvent
 from vm_agent_server.src.agent_registry_db import AgentRegistryDB
 from vm_agent_server.src.deployment_service import DeploymentService
 from vm_agent_server.src.network_event_handler import NetworkEventHandler
@@ -29,7 +29,7 @@ frontend_snapshot_broadcast_task: asyncio.Task | None = None
 heartbeat_watchdog_task: asyncio.Task | None = None
 logger = logging.getLogger(__name__)
 repo_root = Path(__file__).resolve().parents[2]
-deployment_service = DeploymentService(registry_db, repo_root)
+deployment_service = DeploymentService(registry_db, task_db, repo_root)
 
 
 async def _frontend_snapshot_broadcaster():
@@ -95,12 +95,23 @@ frontend_clients = set()
 process_manager_watchers: dict[str, set[WebSocket]] = {}
 frontend_watched_agents: dict[WebSocket, set[str]] = {}
 
+
+def _extract_bearer_token(header_value: str | None) -> str | None:
+    if not header_value:
+        return None
+    prefix = "bearer "
+    if header_value.lower().startswith(prefix):
+        return header_value[len(prefix):].strip()
+    return None
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    auth_token = _extract_bearer_token(ws.headers.get("authorization"))
     await ws.accept()    
     await ws.send_text('{"type":"handshake","data":{"client_id":"server","capabilities":["ws"]}}')
 
     client_id = None
+    authenticated = False
     try:
         while True:
             msg = await ws.receive_text()
@@ -110,7 +121,43 @@ async def websocket_endpoint(ws: WebSocket):
 
                 match(ev.type):
                     case "handshake":
-                        client_id = ev.data.client_id
+                        requested_client_id = ev.data.client_id
+                        auth_result = await registry_db.authorize_agent(requested_client_id, auth_token)
+                        if not auth_result.get("authorized"):
+                            reason = auth_result.get("reason", "unauthorized")
+                            latest_deployment = await registry_db.get_latest_deployment_for_agent(requested_client_id)
+                            if latest_deployment and reason == "bootstrap token expired":
+                                await registry_db.update_deployment(
+                                    latest_deployment["id"],
+                                    status="expired_bootstrap",
+                                    error="Bootstrap token expired before the first successful agent start.",
+                                    completed_at=int(time.time()),
+                                )
+                                await registry_db.upsert_agent(
+                                    requested_client_id,
+                                    status="bootstrap_expired",
+                                    connection_status="offline",
+                                    last_deployment_id=latest_deployment["id"],
+                                    last_seen_at=int(time.time()),
+                                )
+                            logger.warning("Rejecting agent %s during handshake: %s", requested_client_id, reason)
+                            await ws.send_text(AuthResultEvent(data=AuthResultData(status="error", agent_id=requested_client_id, reason=reason)).model_dump_json())
+                            await ws.close(code=4401, reason=reason)
+                            return
+
+                        client_id = requested_client_id
+                        authenticated = True
+                        issued_secret = auth_result.get("issued_secret") or ""
+                        await ws.send_text(
+                            AuthResultEvent(
+                                data=AuthResultData(
+                                    status="ok",
+                                    agent_id=client_id,
+                                    secret=issued_secret,
+                                    secret_issued=bool(issued_secret),
+                                )
+                            ).model_dump_json()
+                        )
                         logger.info("Handshake received from agent %s", client_id)
                         await agent_runtime.register_agent(client_id, ws)
                         await registry_db.upsert_agent(
@@ -123,6 +170,9 @@ async def websocket_endpoint(ws: WebSocket):
                             await _set_agent_window_tracking(client_id, True)
                         frontend_snapshot_event.set()
                     case "heartbeat":
+                        if not authenticated:
+                            await ws.close(code=4401, reason="handshake required")
+                            return
                         agent_runtime.merge_heartbeat(ev.data, telemetry_db)
                         metrics = ev.data.system_metrics if hasattr(ev.data, "system_metrics") else {}
                         hostname = metrics.get("hostname", "") if isinstance(metrics, dict) else ""
@@ -137,6 +187,9 @@ async def websocket_endpoint(ws: WebSocket):
                             )
                         frontend_snapshot_event.set()
                     case "task_output":
+                        if not authenticated:
+                            await ws.close(code=4401, reason="handshake required")
+                            return
                         task_db.append_log(
                             ev.data.task_id, ev.data.stream, ev.data.data, ev.data.seq)
                         await broadcast_task_event(ev.data.task_id, {
@@ -147,6 +200,9 @@ async def websocket_endpoint(ws: WebSocket):
                             "seq": ev.data.seq
                         })
                     case "task_status":
+                        if not authenticated:
+                            await ws.close(code=4401, reason="handshake required")
+                            return
                         await task_db.update_task_status(
                             ev.data.task_id, ev.data.status,
                             pid=ev.data.pid, exit_code=ev.data.exit_code, error=ev.data.error,
@@ -163,6 +219,9 @@ async def websocket_endpoint(ws: WebSocket):
                         if ev.data.status in ("completed", "failed", "timeout"):
                             await _advance_pipeline(ev.data.task_id, ev.data.status)
                     case "process_screenshot":
+                        if not authenticated:
+                            await ws.close(code=4401, reason="handshake required")
+                            return
                         await broadcast_process_screenshot({
                             "type": "process_screenshot",
                             "agent_id": ev.data.agent_id or client_id or "",
@@ -485,18 +544,29 @@ async def api_prepare_deployment(request: Request):
 
     agent_id = (body.get("agent_id") or hostname).strip()
     display_name = (body.get("display_name") or hostname).strip()
+    repo_url = (body.get("repo_url") or deployment_service.get_default_repo_url()).strip()
     source_ref = (body.get("source_ref") or "main").strip() or "main"
     requested_by = (body.get("requested_by") or "user").strip() or "user"
 
-    deployment = await deployment_service.prepare_deployment(
-        agent_id=agent_id,
-        hostname=hostname,
-        display_name=display_name,
-        source_ref=source_ref,
-        requested_by=requested_by,
-        server_ws_url=_resolve_agent_ws_url(request),
-    )
+    try:
+        deployment = await deployment_service.prepare_deployment(
+            agent_id=agent_id,
+            hostname=hostname,
+            display_name=display_name,
+            repo_url=repo_url,
+            source_ref=source_ref,
+            requested_by=requested_by,
+            server_ws_url=_resolve_agent_ws_url(request),
+        )
+    except RuntimeError as exc:
+        active = await registry_db.get_active_deployment()
+        return JSONResponse({"error": str(exc), "active_deployment": active}, status_code=409)
     return JSONResponse(deployment)
+
+
+@app.get("/api/deployments/config")
+async def api_get_deployment_config():
+    return JSONResponse(await deployment_service.get_prepare_config())
 
 
 @app.get("/api/deployments")
@@ -510,6 +580,23 @@ async def api_get_deployment(deployment_id: str):
     if not deployment:
         return JSONResponse({"error": "Not found"}, status_code=404)
     return JSONResponse(deployment)
+
+
+@app.get("/api/deployments/{deployment_id}/installer")
+async def api_get_deployment_installer(deployment_id: str):
+    deployment = await registry_db.get_deployment(deployment_id)
+    if not deployment:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+
+    candidate_path = deployment.get("installer_copy_path") or deployment.get("install_script_path")
+    if not candidate_path:
+        return JSONResponse({"error": "Installer script not available"}, status_code=404)
+
+    installer_path = Path(candidate_path)
+    if not installer_path.exists():
+        return JSONResponse({"error": "Installer script not found on disk"}, status_code=404)
+
+    return PlainTextResponse(installer_path.read_text(encoding="utf-8"), media_type="text/plain")
 
 
 @app.get("/api/guacamole/config")

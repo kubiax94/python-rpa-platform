@@ -22,6 +22,7 @@ class AgentClient(IProcesable, IEventAware):
         self._handler: EventHandler = None
         self.client_id: str = uuid4().hex
         self._connection_manager_task: asyncio.Task = None
+        self._fatal_error_reason: str | None = None
 
 
     def start(self, bus: EventEmitter, config):
@@ -38,6 +39,22 @@ class AgentClient(IProcesable, IEventAware):
 
         self._connection_manager_task = asyncio.create_task(self.connection_manager(self._connection, self, bus))
 
+    def update_credentials(self, *, secret: str | None = None, bootstrap_token: str | None = None):
+        if self._connection:
+            self._connection.update_credentials(secret=secret, bootstrap_token=bootstrap_token)
+
+    def stop(self, reason: str | None = None):
+        self._fatal_error_reason = reason
+        if self._connection:
+            self._connection.stop(reason)
+
+    def get_fatal_error_reason(self) -> str | None:
+        if self._fatal_error_reason:
+            return self._fatal_error_reason
+        if self._connection:
+            return self._connection.get_fatal_error_reason()
+        return None
+
     async def connection_manager(self, agent_connection, client, bus):
         handshake_registered = False
         while True:
@@ -50,7 +67,15 @@ class AgentClient(IProcesable, IEventAware):
 
                 await agent_connection._read_loop_task
                 handshake_registered = False
+                if agent_connection.get_status() == AgentConnectionStatus.STOP:
+                    self._fatal_error_reason = agent_connection.get_fatal_error_reason()
+                    logging.error(f"Stopping connection manager due to fatal connection error: {self._fatal_error_reason}")
+                    break
             except Exception as e:
+                if agent_connection.get_status() == AgentConnectionStatus.STOP:
+                    self._fatal_error_reason = agent_connection.get_fatal_error_reason() or str(e)
+                    logging.error(f"Stopping connection manager due to fatal connection error: {self._fatal_error_reason}")
+                    break
                 logging.error(f"Connection manager error: {e}")
                 await asyncio.sleep(agent_connection._retry_delay)
 

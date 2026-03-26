@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from typing import Any, Optional
 
 import aiosqlite
@@ -44,14 +45,17 @@ CREATE TABLE IF NOT EXISTS agent_deployments (
     id                  TEXT PRIMARY KEY,
     agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     hostname            TEXT NOT NULL,
+    repo_url            TEXT NOT NULL DEFAULT '',
     source_ref          TEXT NOT NULL DEFAULT 'main',
     requested_by        TEXT NOT NULL DEFAULT 'user',
     status              TEXT NOT NULL DEFAULT 'queued',
+    task_id             TEXT,
     commit_sha          TEXT NOT NULL DEFAULT '',
     artifact_dir        TEXT NOT NULL DEFAULT '',
     artifact_exe_path   TEXT NOT NULL DEFAULT '',
     bootstrap_path      TEXT NOT NULL DEFAULT '',
     install_script_path TEXT NOT NULL DEFAULT '',
+    installer_copy_path TEXT NOT NULL DEFAULT '',
     error               TEXT,
     build_log           TEXT NOT NULL DEFAULT '',
     created_at          INTEGER NOT NULL,
@@ -93,8 +97,20 @@ class AgentRegistryDB:
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(SCHEMA)
+        await self._ensure_column("agent_deployments", "repo_url", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column("agent_deployments", "task_id", "TEXT")
+        await self._ensure_column("agent_deployments", "installer_copy_path", "TEXT NOT NULL DEFAULT ''")
         await self._db.commit()
         logger.info("AgentRegistryDB started: %s", self._db_path)
+
+    async def _ensure_column(self, table: str, column: str, column_type: str):
+        if not self._db:
+            return
+
+        async with self._db.execute(f"PRAGMA table_info({table})") as cursor:
+            existing = {row[1] async for row in cursor}
+        if column not in existing:
+            await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
     async def stop(self):
         if self._db:
@@ -179,13 +195,76 @@ class AgentRegistryDB:
         )
         await self._db.commit()
 
+    async def get_agent_credentials(self, agent_id: str) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+        async with self._db.execute("SELECT * FROM agent_credentials WHERE agent_id = ?", (agent_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            columns = [d[0] for d in cursor.description]
+            return dict(zip(columns, row))
+
+    async def authorize_agent(self, agent_id: str, token: str | None) -> dict[str, Any]:
+        credentials = await self.get_agent_credentials(agent_id)
+        if not credentials:
+            return {"authorized": True, "mode": "legacy", "issued_secret": None}
+
+        bootstrap_token_hash = credentials.get("bootstrap_token_hash")
+        bootstrap_expires_at = credentials.get("bootstrap_expires_at")
+        bootstrap_used_at = credentials.get("bootstrap_used_at")
+        secret_hash = credentials.get("secret_hash")
+
+        if not token:
+            if bootstrap_token_hash or secret_hash:
+                return {"authorized": False, "reason": "missing bearer token"}
+            return {"authorized": True, "mode": "legacy", "issued_secret": None}
+
+        token_hash = hash_token(token)
+        now = int(time.time())
+
+        if secret_hash and token_hash == secret_hash:
+            return {"authorized": True, "mode": "secret", "issued_secret": None}
+
+        if (
+            bootstrap_token_hash
+            and token_hash == bootstrap_token_hash
+            and not bootstrap_used_at
+            and (bootstrap_expires_at is None or bootstrap_expires_at >= now)
+        ):
+            issued_secret = uuid.uuid4().hex + uuid.uuid4().hex
+            if self._db:
+                await self._db.execute(
+                    """
+                    UPDATE agent_credentials
+                    SET secret_hash = ?,
+                        secret_rotated_at = ?,
+                        bootstrap_used_at = ?,
+                        updated_at = ?
+                    WHERE agent_id = ?
+                    """,
+                    (hash_token(issued_secret), now, now, now, agent_id),
+                )
+                await self._db.commit()
+            return {"authorized": True, "mode": "bootstrap", "issued_secret": issued_secret}
+
+        if bootstrap_token_hash and bootstrap_expires_at and bootstrap_expires_at < now and not bootstrap_used_at:
+            return {"authorized": False, "reason": "bootstrap token expired"}
+
+        if bootstrap_token_hash and bootstrap_used_at and token_hash == bootstrap_token_hash:
+            return {"authorized": False, "reason": "bootstrap token already used"}
+
+        return {"authorized": False, "reason": "invalid bearer token"}
+
     async def create_deployment(
         self,
         deployment_id: str,
         agent_id: str,
         hostname: str,
+        repo_url: str,
         source_ref: str,
         requested_by: str,
+        task_id: str,
     ):
         if not self._db:
             return
@@ -193,10 +272,10 @@ class AgentRegistryDB:
         now = int(time.time())
         await self._db.execute(
             """
-            INSERT INTO agent_deployments (id, agent_id, hostname, source_ref, requested_by, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'queued', ?)
+            INSERT INTO agent_deployments (id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)
             """,
-            (deployment_id, agent_id, hostname, source_ref, requested_by, now),
+            (deployment_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, now),
         )
         await self._db.commit()
         await self.upsert_agent(agent_id, hostname=hostname, last_deployment_id=deployment_id)
@@ -206,11 +285,13 @@ class AgentRegistryDB:
         deployment_id: str,
         *,
         status: str | None = None,
+        task_id: str | None = None,
         commit_sha: str | None = None,
         artifact_dir: str | None = None,
         artifact_exe_path: str | None = None,
         bootstrap_path: str | None = None,
         install_script_path: str | None = None,
+        installer_copy_path: str | None = None,
         error: str | None = None,
         build_log: str | None = None,
         started_at: int | None = None,
@@ -223,11 +304,13 @@ class AgentRegistryDB:
         params: list[Any] = []
         for name, value in (
             ("status", status),
+            ("task_id", task_id),
             ("commit_sha", commit_sha),
             ("artifact_dir", artifact_dir),
             ("artifact_exe_path", artifact_exe_path),
             ("bootstrap_path", bootstrap_path),
             ("install_script_path", install_script_path),
+            ("installer_copy_path", installer_copy_path),
             ("error", error),
             ("build_log", build_log),
             ("started_at", started_at),
@@ -295,3 +378,28 @@ class AgentRegistryDB:
             async for row in cursor:
                 rows.append(dict(zip(columns, row)))
         return rows
+
+    async def get_active_deployment(self) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+        async with self._db.execute(
+            "SELECT * FROM agent_deployments WHERE status IN ('queued', 'building') ORDER BY created_at ASC LIMIT 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            columns = [d[0] for d in cursor.description]
+            return dict(zip(columns, row))
+
+    async def get_latest_deployment_for_agent(self, agent_id: str) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+        async with self._db.execute(
+            "SELECT * FROM agent_deployments WHERE agent_id = ? ORDER BY created_at DESC LIMIT 1",
+            (agent_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            columns = [d[0] for d in cursor.description]
+            return dict(zip(columns, row))

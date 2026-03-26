@@ -114,6 +114,21 @@ class HeartbeatEvent(NetworkEvent):
     data: HeartbeatData
 
 
+class AuthResultData(BaseModel):
+    status: Literal["ok", "error"] = Field(default="ok")
+    agent_id: str = Field(default="", description="Resolved agent identifier")
+    secret: str = Field(default="", description="Issued long-lived secret after bootstrap exchange")
+    secret_issued: bool = Field(default=False, description="Whether the server exchanged the bootstrap token for a new secret")
+    reason: str = Field(default="", description="Error detail when authentication fails")
+
+
+@register_event("auth_result")
+class AuthResultEvent(NetworkEvent):
+    _owner = "server"
+    type: Literal["auth_result"] = "auth_result"
+    data: AuthResultData = Field(default_factory=AuthResultData)
+
+
 # ── Task System Events ──────────────────────────────────────────────
 
 # Server → Agent: Execute a task (PowerShell script)
