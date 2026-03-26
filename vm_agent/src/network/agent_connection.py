@@ -3,7 +3,7 @@ from enum import Enum
 import logging
 import types
 from pyee.base import EventEmitter
-from websockets import ClientConnection, ConnectionClosedError
+from websockets import ClientConnection, ConnectionClosed
 from websockets.asyncio.client import connect
 
 from shared.core.iprocesable import IProcesable
@@ -154,11 +154,11 @@ class AgentConnection(IConnection):
                         await self.client.process(msg)
                     except Exception as e:
                         logging.error(f"Client processing error: {e}")
-        except ConnectionClosedError as e:
+        except ConnectionClosed as e:
             close_code = getattr(e, "code", None) or getattr(getattr(e, "rcvd", None), "code", None)
             close_reason = getattr(e, "reason", None) or getattr(getattr(e, "rcvd", None), "reason", None) or str(e)
             logging.warning(f"Connection closed: {e}")
-            if close_code == 4401:
+            if close_code in (4401, 4403):
                 self.stop(close_reason or "authentication failed")
             else:
                 self._status = AgentConnectionStatus.ERROR
@@ -167,6 +167,7 @@ class AgentConnection(IConnection):
             pass
         except Exception as e:
             logging.error(f"Error while reading from {self.url}: {e}")
+            self._status = AgentConnectionStatus.ERROR
         finally:
             self._read_loop_task = None
 

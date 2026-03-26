@@ -404,7 +404,7 @@ class DeploymentService:
                 try {{
                     return Get-Content -LiteralPath $bootstrapPath -Raw | ConvertFrom-Json
                 }} catch {{
-                    throw "Failed to parse bootstrap metadata from $bootstrapPath: $($_.Exception.Message)"
+                    throw "Failed to parse bootstrap metadata from ${bootstrapPath}: $($_.Exception.Message)"
                 }}
             }}
 

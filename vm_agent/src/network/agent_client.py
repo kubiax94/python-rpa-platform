@@ -3,7 +3,6 @@ import logging
 import os
 from uuid import uuid4
 from pyee import EventEmitter
-from websockets import ConnectionClosedError
 from shared.core.event_handler import EventHandler
 from shared.core.iprocesable import IProcesable
 from shared.network.events.example_event import HandshakeData, HandshakeEvent
@@ -72,6 +71,15 @@ class AgentClient(IProcesable, IEventAware):
                     self._fatal_error_reason = agent_connection.get_fatal_error_reason()
                     logging.error(f"Stopping connection manager due to fatal connection error: {self._fatal_error_reason}")
                     break
+
+                if agent_connection.get_status() != AgentConnectionStatus.CONNECTED:
+                    agent_connection._status = AgentConnectionStatus.RECONNECTING
+                    logging.warning(
+                        "Connection loop ended with status %s. Retrying in %ss.",
+                        agent_connection.get_status().name,
+                        agent_connection._retry_delay,
+                    )
+                    await asyncio.sleep(agent_connection._retry_delay)
             except Exception as e:
                 if agent_connection.get_status() == AgentConnectionStatus.STOP:
                     self._fatal_error_reason = agent_connection.get_fatal_error_reason() or str(e)
