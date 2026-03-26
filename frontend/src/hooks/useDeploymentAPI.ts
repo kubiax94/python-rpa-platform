@@ -76,10 +76,29 @@ export function buildInstallCommand(deployment: AgentDeployment, config: Deploym
     : deployment.installer_copy_path || deployment.install_script_path;
   const commandParts = [
     "powershell",
+    "-NoProfile",
     "-ExecutionPolicy",
     "Bypass",
     "-File",
     `\"${installerPath}\"`,
+    "-ArtifactId",
+    `\"${deployment.id}\"`,
+  ];
+  return commandParts.join(" ");
+}
+
+export function buildLocalInstallCommand(deployment: AgentDeployment): string {
+  const localPackagePath = "C:\\path\\to\\package";
+  const localInstallerPath = `${localPackagePath}\\install.ps1`;
+  const commandParts = [
+    "powershell",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    `\"${localInstallerPath}\"`,
+    "-PackagePath",
+    `\"${localPackagePath}\"`,
     "-ArtifactId",
     `\"${deployment.id}\"`,
   ];

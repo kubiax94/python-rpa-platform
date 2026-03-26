@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { buildInstallCommand, getDeploymentInstallerUrl, prepareDeployment, useDeployment, useDeploymentConfig } from "@/hooks/useDeploymentAPI";
+import { buildInstallCommand, buildLocalInstallCommand, getDeploymentInstallerUrl, prepareDeployment, useDeployment, useDeploymentConfig } from "@/hooks/useDeploymentAPI";
 
 interface DeployAgentDialogProps {
   open: boolean;
@@ -214,14 +214,28 @@ export function DeployAgentDialog({ open, initialAgentId, initialHostname, initi
                     type="button"
                     onClick={async () => {
                       await navigator.clipboard.writeText(buildInstallCommand(deployment, config));
-                      setCopyState("Install command copied");
+                      setCopyState("Share install command copied");
                       setTimeout(() => setCopyState(null), 2500);
                     }}
                     className="rounded-lg bg-cyan-500 px-3 py-1.5 text-sm font-medium text-slate-950 transition-colors hover:bg-cyan-400"
                   >
-                    Copy install command
+                    Copy share command
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await navigator.clipboard.writeText(buildLocalInstallCommand(deployment));
+                      setCopyState("Local install command copied");
+                      setTimeout(() => setCopyState(null), 2500);
+                    }}
+                    className="rounded-lg border border-cyan-500/40 px-3 py-1.5 text-sm font-medium text-cyan-200 transition-colors hover:bg-cyan-500/10"
+                  >
+                    Copy local command
                   </button>
                   {copyState && <span className="self-center text-xs text-cyan-300">{copyState}</span>}
+                </div>
+                <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-3 text-xs text-slate-400">
+                  Local mode: copy the whole package folder to the VM and run the installer with -PackagePath pointing at that local package directory. The script now prefers a valid local package before trying the network share.
                 </div>
                 {!!taskLog.log && (
                   <details open className="rounded-lg border border-slate-700 bg-slate-900/70 p-3">

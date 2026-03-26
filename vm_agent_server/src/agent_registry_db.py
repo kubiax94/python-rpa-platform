@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Any, Optional
@@ -10,6 +11,7 @@ from typing import Any, Optional
 import aiosqlite
 
 logger = logging.getLogger(__name__)
+BOOTSTRAP_RECOVERY_WINDOW_SECONDS = int(os.getenv("VM_AGENT_BOOTSTRAP_RECOVERY_WINDOW_SECONDS", str(24 * 60 * 60)))
 
 AGENT_REGISTRY_DB_PATH = "agents.db"
 
@@ -214,6 +216,7 @@ class AgentRegistryDB:
         bootstrap_expires_at = credentials.get("bootstrap_expires_at")
         bootstrap_used_at = credentials.get("bootstrap_used_at")
         secret_hash = credentials.get("secret_hash")
+        secret_rotated_at = credentials.get("secret_rotated_at")
 
         if not token:
             if bootstrap_token_hash or secret_hash:
@@ -224,6 +227,17 @@ class AgentRegistryDB:
         now = int(time.time())
 
         if secret_hash and token_hash == secret_hash:
+            if not bootstrap_used_at and self._db:
+                await self._db.execute(
+                    """
+                    UPDATE agent_credentials
+                    SET bootstrap_used_at = ?,
+                        updated_at = ?
+                    WHERE agent_id = ?
+                    """,
+                    (now, now, agent_id),
+                )
+                await self._db.commit()
             return {"authorized": True, "mode": "secret", "issued_secret": None}
 
         if (
@@ -239,14 +253,41 @@ class AgentRegistryDB:
                     UPDATE agent_credentials
                     SET secret_hash = ?,
                         secret_rotated_at = ?,
-                        bootstrap_used_at = ?,
                         updated_at = ?
                     WHERE agent_id = ?
                     """,
-                    (hash_token(issued_secret), now, now, now, agent_id),
+                    (hash_token(issued_secret), now, now, agent_id),
                 )
                 await self._db.commit()
             return {"authorized": True, "mode": "bootstrap", "issued_secret": issued_secret}
+
+        if (
+            bootstrap_token_hash
+            and token_hash == bootstrap_token_hash
+            and bootstrap_used_at
+            and secret_hash
+            and secret_rotated_at
+            and now - secret_rotated_at <= BOOTSTRAP_RECOVERY_WINDOW_SECONDS
+        ):
+            issued_secret = uuid.uuid4().hex + uuid.uuid4().hex
+            logger.warning(
+                "Recovering bootstrap credentials for agent %s within %ss window",
+                agent_id,
+                BOOTSTRAP_RECOVERY_WINDOW_SECONDS,
+            )
+            if self._db:
+                await self._db.execute(
+                    """
+                    UPDATE agent_credentials
+                    SET secret_hash = ?,
+                        secret_rotated_at = ?,
+                        updated_at = ?
+                    WHERE agent_id = ?
+                    """,
+                    (hash_token(issued_secret), now, now, agent_id),
+                )
+                await self._db.commit()
+            return {"authorized": True, "mode": "bootstrap-recovery", "issued_secret": issued_secret}
 
         if bootstrap_token_hash and bootstrap_expires_at and bootstrap_expires_at < now and not bootstrap_used_at:
             return {"authorized": False, "reason": "bootstrap token expired"}
@@ -403,3 +444,12 @@ class AgentRegistryDB:
                 return None
             columns = [d[0] for d in cursor.description]
             return dict(zip(columns, row))
+
+    async def get_expected_hostname_for_agent(self, agent_id: str) -> str:
+        agent = await self.get_agent(agent_id)
+        hostname = str((agent or {}).get("hostname") or "").strip()
+        if hostname:
+            return hostname
+
+        deployment = await self.get_latest_deployment_for_agent(agent_id)
+        return str((deployment or {}).get("hostname") or "").strip()

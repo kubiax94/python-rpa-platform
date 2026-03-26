@@ -317,12 +317,127 @@ class DeploymentService:
                 [string]$InstallRoot = "C:\\agent\\MyOrciestra",
                 [string]$ServiceName = "VmAgent",
                 [string]$ArtifactId = "{deployment_id}",
-                [string]$ArtifactSourceRoot = "{artifact_share_root}"
+                [string]$ArtifactSourceRoot = "{artifact_share_root}",
+                [string]$PackagePath = ""
             )
+
+            function Test-PathSafe {{
+                param([string]$CandidatePath)
+                if ([string]::IsNullOrWhiteSpace($CandidatePath)) {{
+                    return $false
+                }}
+
+                try {{
+                    return Test-Path -LiteralPath $CandidatePath
+                }} catch {{
+                    return $false
+                }}
+            }}
+
+            function Normalize-DirectoryPath {{
+                param([string]$CandidatePath)
+                if ([string]::IsNullOrWhiteSpace($CandidatePath)) {{
+                    return $null
+                }}
+
+                $resolved = Resolve-Path -LiteralPath $CandidatePath -ErrorAction SilentlyContinue
+                if ($resolved) {{
+                    return $resolved.Path
+                }}
+
+                $combined = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $CandidatePath))
+                $resolvedCombined = Resolve-Path -LiteralPath $combined -ErrorAction SilentlyContinue
+                if ($resolvedCombined) {{
+                    return $resolvedCombined.Path
+                }}
+
+                return $combined
+            }}
+
+            function Test-PackageDirectory {{
+                param([string]$CandidatePath)
+                if ([string]::IsNullOrWhiteSpace($CandidatePath)) {{
+                    return $false
+                }}
+
+                $normalizedPath = Normalize-DirectoryPath -CandidatePath $CandidatePath
+                if ([string]::IsNullOrWhiteSpace($normalizedPath)) {{
+                    return $false
+                }}
+
+                if (-not (Test-PathSafe -CandidatePath $normalizedPath)) {{
+                    return $false
+                }}
+
+                $item = Get-Item -LiteralPath $normalizedPath -ErrorAction SilentlyContinue
+                if (-not $item) {{
+                    return $false
+                }}
+
+                $directoryPath = $null
+                if ($item.PSIsContainer) {{
+                    $directoryPath = $item.FullName
+                }} else {{
+                    $directoryPath = $item.DirectoryName
+                }}
+                if ([string]::IsNullOrWhiteSpace($directoryPath)) {{
+                    return $false
+                }}
+
+                $exeCandidate = Join-Path $directoryPath "agent_service.exe"
+                return Test-PathSafe -CandidatePath $exeCandidate
+            }}
 
             function Resolve-PackagePath {{
                 param([string]$RootPath, [string]$DeploymentId)
                 return Join-Path (Join-Path $RootPath $DeploymentId) "package"
+            }}
+
+            function Get-BootstrapMetadata {{
+                param([string]$PackageRoot)
+
+                $bootstrapPath = Join-Path $PackageRoot "agent.bootstrap.json"
+                if (-not (Test-PathSafe -CandidatePath $bootstrapPath)) {{
+                    return $null
+                }}
+
+                try {{
+                    return Get-Content -LiteralPath $bootstrapPath -Raw | ConvertFrom-Json
+                }} catch {{
+                    throw "Failed to parse bootstrap metadata from $bootstrapPath: $($_.Exception.Message)"
+                }}
+            }}
+
+            function Resolve-LocalPackagePath {{
+                param([string]$ExplicitPath)
+
+                $candidates = @()
+                if ($ExplicitPath) {{
+                    $candidates += $ExplicitPath
+                    $candidates += (Join-Path $ExplicitPath "package")
+                }}
+
+                if ($PSScriptRoot) {{
+                    $candidates += $PSScriptRoot
+                    $candidates += (Join-Path $PSScriptRoot "package")
+                }}
+
+                $candidates += (Get-Location).Path
+                $candidates += (Join-Path (Get-Location).Path "package")
+
+                foreach ($candidate in $candidates) {{
+                    if (Test-PackageDirectory -CandidatePath $candidate) {{
+                        $item = Get-Item -LiteralPath (Normalize-DirectoryPath -CandidatePath $candidate) -ErrorAction SilentlyContinue
+                        if ($item -and $item.PSIsContainer) {{
+                            return $item.FullName
+                        }}
+                        if ($item -and $item.DirectoryName) {{
+                            return $item.DirectoryName
+                        }}
+                    }}
+                }}
+
+                return $null
             }}
 
             function Mount-ArtifactShare {{
@@ -337,16 +452,29 @@ class DeploymentService:
                 return "$driveName`:"
             }}
 
-            $PackageRoot = Resolve-PackagePath -RootPath $ArtifactSourceRoot -DeploymentId $ArtifactId
-            if (-not (Test-Path $PackageRoot)) {{
-                if ($ArtifactSourceRoot.StartsWith("\\")) {{
+            $PackageRoot = Resolve-LocalPackagePath -ExplicitPath $PackagePath
+            if (-not $PackageRoot) {{
+                $PackageRoot = Resolve-PackagePath -RootPath $ArtifactSourceRoot -DeploymentId $ArtifactId
+            }}
+
+            if (-not (Test-PathSafe -CandidatePath $PackageRoot)) {{
+                if (-not [string]::IsNullOrWhiteSpace($ArtifactSourceRoot) -and $ArtifactSourceRoot.StartsWith("\\")) {{
                     $mountedRoot = Mount-ArtifactShare -RootPath $ArtifactSourceRoot
                     $PackageRoot = Resolve-PackagePath -RootPath $mountedRoot -DeploymentId $ArtifactId
                 }}
             }}
 
-            if (-not (Test-Path $PackageRoot)) {{
-                throw "Artifact package not found for deployment $ArtifactId under $ArtifactSourceRoot"
+            if (-not (Test-PathSafe -CandidatePath $PackageRoot)) {{
+                throw "Artifact package not found. Provide -PackagePath with a local package folder or ensure the share path is reachable: $ArtifactSourceRoot"
+            }}
+
+            $BootstrapMetadata = Get-BootstrapMetadata -PackageRoot $PackageRoot
+            if ($BootstrapMetadata -and $BootstrapMetadata.hostname) {{
+                $expectedHostname = [string]$BootstrapMetadata.hostname
+                $localHostname = [string]$env:COMPUTERNAME
+                if ($expectedHostname -and $localHostname -and $expectedHostname.ToLowerInvariant() -ne $localHostname.ToLowerInvariant()) {{
+                    throw "Bootstrap package is bound to host '$expectedHostname', but this machine is '$localHostname'. Copy the package to the intended VM or prepare a deployment for this host."
+                }}
             }}
 
             $ExePath = Join-Path $PackageRoot "agent_service.exe"

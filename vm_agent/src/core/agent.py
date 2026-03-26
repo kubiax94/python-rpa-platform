@@ -71,6 +71,20 @@ class VmAgent(AgentBus):
         self._window_refresh_interval_sec: float = 60.0
         self._window_tracking_enabled: bool = False
 
+    def _validate_runtime_host(self):
+        expected_hostname = str(self._runtime_config.get("hostname") or "").strip()
+        if not expected_hostname:
+            return
+
+        local_hostname = str(os.getenv("COMPUTERNAME") or "").strip()
+        if not local_hostname:
+            return
+
+        if expected_hostname.lower() != local_hostname.lower():
+            raise RuntimeError(
+                f"Bootstrap package is bound to host '{expected_hostname}', but the agent is running on '{local_hostname}'."
+            )
+
     def run(self):
         logging.info("VmAgent.run() START")
         AuthResultEvent().register_listener(self, self._handle_auth_result, once=False)
@@ -86,6 +100,7 @@ class VmAgent(AgentBus):
 
     async def _async_run(self):
         try:
+            self._validate_runtime_host()
             connection_config = {
                 "url": self._runtime_config.get("server_url", "ws://192.168.1.10:8765/ws"),
                 "secret": self._runtime_config.get("secret"),

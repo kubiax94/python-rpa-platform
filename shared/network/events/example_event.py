@@ -6,6 +6,7 @@ from shared.network.events import register_event
 
 class HandshakeData(BaseModel):
     client_id: str = Field(description="Unique identifier for the client", default="")
+    hostname: str = Field(description="Observed machine hostname reported by the agent", default="")
     capabilities: List[str] = []
 
 @register_event("handshake")  # zarejestruje pod "handshake"

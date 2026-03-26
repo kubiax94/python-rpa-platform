@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { buildInstallCommand, getDeploymentInstallerUrl, useDeployment, useDeploymentConfig, useDeployments } from "@/hooks/useDeploymentAPI";
+import { useState } from "react";
+import { buildInstallCommand, buildLocalInstallCommand, getDeploymentInstallerUrl, useDeployment, useDeploymentConfig, useDeployments } from "@/hooks/useDeploymentAPI";
 
 function formatDateTime(ts: number | null | undefined): string {
   if (!ts) return "-";
@@ -21,18 +21,10 @@ export function DeploymentsPage() {
   const { data: config } = useDeploymentConfig();
   const [selectedDeploymentId, setSelectedDeploymentId] = useState<string | null>(null);
   const [copiedMessage, setCopiedMessage] = useState<string | null>(null);
-  const { data: deployment, taskLog } = useDeployment(selectedDeploymentId);
-
-  useEffect(() => {
-    if (!selectedDeploymentId && deployments.length > 0) {
-      setSelectedDeploymentId(deployments[0].id);
-      return;
-    }
-
-    if (selectedDeploymentId && !deployments.some((item) => item.id === selectedDeploymentId)) {
-      setSelectedDeploymentId(deployments[0]?.id ?? null);
-    }
-  }, [deployments, selectedDeploymentId]);
+  const effectiveSelectedDeploymentId = selectedDeploymentId && deployments.some((item) => item.id === selectedDeploymentId)
+    ? selectedDeploymentId
+    : deployments[0]?.id ?? null;
+  const { data: deployment, taskLog } = useDeployment(effectiveSelectedDeploymentId);
 
   return (
     <div className="space-y-6">
@@ -61,7 +53,7 @@ export function DeploymentsPage() {
                 key={item.id}
                 type="button"
                 onClick={() => setSelectedDeploymentId(item.id)}
-                className={`w-full border-b border-slate-800 px-4 py-3 text-left transition-colors hover:bg-slate-800/70 ${selectedDeploymentId === item.id ? "bg-slate-800" : "bg-transparent"}`}
+                className={`w-full border-b border-slate-800 px-4 py-3 text-left transition-colors hover:bg-slate-800/70 ${effectiveSelectedDeploymentId === item.id ? "bg-slate-800" : "bg-transparent"}`}
               >
                 <div className="flex items-center justify-between gap-3">
                   <div>
@@ -106,12 +98,23 @@ export function DeploymentsPage() {
                     type="button"
                     onClick={async () => {
                       await navigator.clipboard.writeText(buildInstallCommand(deployment, config));
-                      setCopiedMessage("Install command copied");
+                      setCopiedMessage("Share install command copied");
                       setTimeout(() => setCopiedMessage(null), 2500);
                     }}
                     className="rounded-lg bg-cyan-500 px-3 py-1.5 text-sm font-medium text-slate-950 transition-colors hover:bg-cyan-400"
                   >
-                    Copy install command
+                    Copy share command
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await navigator.clipboard.writeText(buildLocalInstallCommand(deployment));
+                      setCopiedMessage("Local install command copied");
+                      setTimeout(() => setCopiedMessage(null), 2500);
+                    }}
+                    className="rounded-lg border border-cyan-500/40 px-3 py-1.5 text-sm font-medium text-cyan-200 transition-colors hover:bg-cyan-500/10"
+                  >
+                    Copy local command
                   </button>
                 </div>
               </div>
@@ -140,6 +143,10 @@ export function DeploymentsPage() {
                 <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-sm md:col-span-2">
                   <div className="text-slate-400">Installer copy</div>
                   <div className="mt-1 break-all font-mono text-slate-200">{deployment.installer_copy_path || deployment.install_script_path || "-"}</div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-sm md:col-span-2">
+                  <div className="text-slate-400">Local install mode</div>
+                  <div className="mt-1 text-slate-300">Copy the full package folder locally and run install.ps1 with -PackagePath pointing to that local package directory.</div>
                 </div>
               </div>
 

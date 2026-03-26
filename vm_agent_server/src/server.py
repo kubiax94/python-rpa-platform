@@ -122,6 +122,7 @@ async def websocket_endpoint(ws: WebSocket):
                 match(ev.type):
                     case "handshake":
                         requested_client_id = ev.data.client_id
+                        reported_hostname = str(getattr(ev.data, "hostname", "") or "").strip()
                         auth_result = await registry_db.authorize_agent(requested_client_id, auth_token)
                         if not auth_result.get("authorized"):
                             reason = auth_result.get("reason", "unauthorized")
@@ -143,6 +144,27 @@ async def websocket_endpoint(ws: WebSocket):
                             logger.warning("Rejecting agent %s during handshake: %s", requested_client_id, reason)
                             await ws.send_text(AuthResultEvent(data=AuthResultData(status="error", agent_id=requested_client_id, reason=reason)).model_dump_json())
                             await ws.close(code=4401, reason=reason)
+                            return
+
+                        expected_hostname = await registry_db.get_expected_hostname_for_agent(requested_client_id)
+                        if expected_hostname and reported_hostname and expected_hostname.lower() != reported_hostname.lower():
+                            reason = f"hostname mismatch: expected {expected_hostname}, got {reported_hostname}"
+                            latest_deployment = await registry_db.get_latest_deployment_for_agent(requested_client_id)
+                            if latest_deployment:
+                                await registry_db.update_deployment(
+                                    latest_deployment["id"],
+                                    error=f"Agent attempted bootstrap from unexpected host '{reported_hostname}'. Expected '{expected_hostname}'.",
+                                )
+                            await registry_db.upsert_agent(
+                                requested_client_id,
+                                hostname=expected_hostname,
+                                status="hostname_mismatch",
+                                connection_status="offline",
+                                last_seen_at=int(time.time()),
+                            )
+                            logger.warning("Rejecting agent %s during handshake: %s", requested_client_id, reason)
+                            await ws.send_text(AuthResultEvent(data=AuthResultData(status="error", agent_id=requested_client_id, reason=reason)).model_dump_json())
+                            await ws.close(code=4403, reason="hostname mismatch")
                             return
 
                         client_id = requested_client_id
@@ -176,6 +198,24 @@ async def websocket_endpoint(ws: WebSocket):
                         agent_runtime.merge_heartbeat(ev.data, telemetry_db)
                         metrics = ev.data.system_metrics if hasattr(ev.data, "system_metrics") else {}
                         hostname = metrics.get("hostname", "") if isinstance(metrics, dict) else ""
+                        if client_id:
+                            expected_hostname = await registry_db.get_expected_hostname_for_agent(client_id)
+                            if expected_hostname and hostname and expected_hostname.lower() != hostname.lower():
+                                logger.warning(
+                                    "Disconnecting agent %s after heartbeat hostname mismatch: expected %s, got %s",
+                                    client_id,
+                                    expected_hostname,
+                                    hostname,
+                                )
+                                await registry_db.upsert_agent(
+                                    client_id,
+                                    hostname=expected_hostname,
+                                    status="hostname_mismatch",
+                                    connection_status="offline",
+                                    last_seen_at=int(time.time()),
+                                )
+                                await ws.close(code=4403, reason="hostname mismatch")
+                                return
                         if client_id:
                             await registry_db.upsert_agent(
                                 client_id,

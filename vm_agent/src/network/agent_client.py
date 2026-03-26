@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from uuid import uuid4
 from pyee import EventEmitter
 from websockets import ConnectionClosedError
@@ -103,6 +104,7 @@ class AgentClient(IProcesable, IEventAware):
         self.init = True
         self.send_event(HandshakeEvent(data=HandshakeData(
             client_id=self.client_id,
+            hostname=str(os.getenv("COMPUTERNAME") or ""),
             capabilities=["ws"]
         )))
 
