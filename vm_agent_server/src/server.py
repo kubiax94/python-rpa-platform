@@ -4,21 +4,30 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from uuid import uuid4
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest, urlopen
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 import uvicorn
+from websockets.asyncio.client import connect as websocket_connect
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from shared.network.events.example_event import AuthResultData, AuthResultEvent, CaptureProcessScreenshotEvent, CreateSessionEvent, ExecuteTaskEvent, ExecuteTaskData, CancelTaskEvent, CancelTaskData, HeartbeatData, SetWindowTrackingData, SetWindowTrackingEvent, StartMonitoredProcessEvent, StartProgramEvent
+from vm_agent_server.src.api.routers.guacamole_router import build_guacamole_router
+from shared.network.events.example_event import AuthResultData, AuthResultEvent, CaptureProcessScreenshotEvent, CreateSessionEvent, CancelTaskEvent, CancelTaskData, HeartbeatData, SetWindowTrackingData, SetWindowTrackingEvent, StartMonitoredProcessEvent, StartProgramEvent
+from vm_agent_server.src.api.routers.deployment_router import build_deployment_router
+from vm_agent_server.src.api.routers.task_router import build_task_router
 from vm_agent_server.src.agent_registry_db import AgentRegistryDB
 from vm_agent_server.src.deployment_service import DeploymentService
 from vm_agent_server.src.network_event_handler import NetworkEventHandler
 from vm_agent_server.src.add_trust_rdp_host import add_trusted_rdp_host, disable_rdp_publisher_warning
 from vm_agent_server.src.agent_runtime import AgentRuntime, HEARTBEAT_TIMEOUT_SECONDS
-from vm_agent_server.src.guacamole_bridge import build_guacamole_session, get_guacamole_config
+from vm_agent_server.src.guacamole_bridge import build_guacamole_proxy_tunnel_urls, build_guacamole_session, create_guacamole_client_session, get_guacamole_config, get_guacamole_request_base_url, inspect_guacamole_connection, invalidate_guacamole_token, list_guacamole_connections
 from vm_agent_server.src.telemetry_db import TelemetryDB
 from vm_agent_server.src.task_db import TaskDB
+from vm_agent_server.src.task_dispatcher import TaskDispatcher, build_agent_task_handler, build_deployment_task_handler
+from vm_agent_server.src.task_service import TaskService
 
 telemetry_db = TelemetryDB()
 task_db = TaskDB()
@@ -29,7 +38,52 @@ frontend_snapshot_broadcast_task: asyncio.Task | None = None
 heartbeat_watchdog_task: asyncio.Task | None = None
 logger = logging.getLogger(__name__)
 repo_root = Path(__file__).resolve().parents[2]
+task_dispatcher = TaskDispatcher()
+task_service = TaskService(task_db, task_dispatcher)
 deployment_service = DeploymentService(registry_db, task_db, repo_root)
+deployment_service.set_task_service(task_service)
+
+
+def _is_benign_connection_reset(context: dict[str, object]) -> bool:
+    exception = context.get("exception")
+    if not isinstance(exception, ConnectionResetError):
+        return False
+
+    if getattr(exception, "winerror", None) != 10054:
+        return False
+
+    handle = context.get("handle")
+    return "_ProactorBasePipeTransport._call_connection_lost" in str(handle)
+
+
+class _UvicornAccessPathFilter(logging.Filter):
+    def __init__(self, suppressed_fragments: tuple[str, ...]):
+        super().__init__()
+        self.suppressed_fragments = suppressed_fragments
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(fragment in message for fragment in self.suppressed_fragments)
+
+
+def _configure_access_log_filters() -> None:
+    if (os.getenv("VM_AGENT_SERVER_SUPPRESS_GUAC_TUNNEL_ACCESS_LOGS") or "true").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+
+    access_logger = logging.getLogger("uvicorn.access")
+    suppressed_fragments = (
+        ' /api/guacamole/tunnel?',
+        ' /api/guacamole/websocket-tunnel',
+    )
+
+    for existing_filter in access_logger.filters:
+        if isinstance(existing_filter, _UvicornAccessPathFilter):
+            return
+
+    access_logger.addFilter(_UvicornAccessPathFilter(suppressed_fragments))
+
+
+_configure_access_log_filters()
 
 
 async def _frontend_snapshot_broadcaster():
@@ -60,6 +114,18 @@ async def _heartbeat_watchdog():
 @asynccontextmanager
 async def lifespan(app):
     global frontend_snapshot_broadcast_task, heartbeat_watchdog_task
+    loop = asyncio.get_running_loop()
+    previous_exception_handler = loop.get_exception_handler()
+
+    def loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict[str, object]) -> None:
+        if _is_benign_connection_reset(context):
+            return
+        if previous_exception_handler is not None:
+            previous_exception_handler(loop, context)
+            return
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(loop_exception_handler)
     await telemetry_db.start()
     await task_db.start()
     await registry_db.start()
@@ -78,6 +144,7 @@ async def lifespan(app):
             await frontend_snapshot_broadcast_task
         except asyncio.CancelledError:
             pass
+    loop.set_exception_handler(previous_exception_handler)
     await task_db.stop()
     await telemetry_db.stop()
     await registry_db.stop()
@@ -90,10 +157,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Guacamole-Tunnel-Token", "Guacamole-Status-Code", "Guacamole-Error-Message"],
 )
 frontend_clients = set()
 process_manager_watchers: dict[str, set[WebSocket]] = {}
 frontend_watched_agents: dict[WebSocket, set[str]] = {}
+guacamole_agent_tokens: dict[str, set[str]] = {}
+guacamole_http_tunnel_tokens: dict[str, str] = {}
+guacamole_websocket_proxy_supported: bool | None = None
 
 
 def _extract_bearer_token(header_value: str | None) -> str | None:
@@ -257,7 +328,7 @@ async def websocket_endpoint(ws: WebSocket):
                         })
                         # Pipeline step orchestration
                         if ev.data.status in ("completed", "failed", "timeout"):
-                            await _advance_pipeline(ev.data.task_id, ev.data.status)
+                            await task_service.advance_pipeline(ev.data.task_id, ev.data.status)
                     case "process_screenshot":
                         if not authenticated:
                             await ws.close(code=4401, reason="handshake required")
@@ -381,6 +452,14 @@ async def _send_to_agent(agent_id: str, event) -> bool:
         return False
 
 
+def _configure_task_handlers() -> None:
+    task_dispatcher.register_handler("agent", build_agent_task_handler(_send_to_agent))
+    task_dispatcher.register_handler("deployment", build_deployment_task_handler(deployment_service.dispatch_task))
+
+
+_configure_task_handlers()
+
+
 async def _forward_frontend_event(event_name: str, requested_agent_id: str, event) -> bool:
     target_agent_id = requested_agent_id or agent_runtime.get_default_target_agent_id()
 
@@ -449,70 +528,6 @@ async def _remove_all_process_manager_watchers(ws: WebSocket):
     for agent_id in list(frontend_watched_agents.get(ws, set())):
         await _remove_process_manager_watcher(ws, agent_id)
 
-
-async def _advance_pipeline(task_id: str, task_status: str):
-    """When a pipeline step finishes, advance to the next step or mark pipeline done."""
-    task = await task_db.get_task(task_id)
-    if not task or not task.get("pipeline_run_id"):
-        return
-
-    run_id = task["pipeline_run_id"]
-    run = await task_db.get_pipeline_run(run_id)
-    if not run or run["status"] not in ("running", "queued"):
-        return
-
-    pipeline = await task_db.get_pipeline(run["pipeline_id"])
-    if not pipeline:
-        return
-
-    steps = pipeline.get("steps", [])
-    current_step = task["step_index"]
-
-    if task_status == "failed" or task_status == "timeout":
-        # Check on_fail policy for this step
-        step_def = next((s for s in steps if s["step_index"] == current_step), None)
-        on_fail = step_def.get("on_fail", "stop") if step_def else "stop"
-        if on_fail == "stop":
-            await task_db.update_pipeline_run_status(run_id, "failed", current_step)
-            return
-
-    # Try to advance to next step
-    next_index = current_step + 1
-    next_step = next((s for s in steps if s["step_index"] == next_index), None)
-
-    if not next_step:
-        # All steps done
-        await task_db.update_pipeline_run_status(run_id, "completed", current_step)
-        return
-
-    # Create and dispatch next task
-    next_task_id = uuid4().hex
-    await task_db.create_task(
-        task_id=next_task_id,
-        agent_id=run["agent_id"],
-        script=next_step["script"],
-        name=next_step.get("name", f"Step {next_index}"),
-        cwd=next_step.get("cwd", ""),
-        timeout_sec=next_step.get("timeout_sec", 300),
-        session=run.get("session", ""),
-        pipeline_run_id=run_id,
-        step_index=next_index,
-        requested_by="pipeline",
-    )
-    await task_db.update_pipeline_run_status(run_id, "running", next_index)
-
-    sent = await _send_to_agent(run["agent_id"], ExecuteTaskEvent(
-        data=ExecuteTaskData(
-            task_id=next_task_id,
-            script=next_step["script"],
-            cwd=next_step.get("cwd", ""),
-            timeout_sec=next_step.get("timeout_sec", 300),
-            session=run.get("session", ""),
-        )
-    ))
-    if sent:
-        await task_db.update_task_status(next_task_id, "running", actor="server")
-
 # --- REST API for historical data ---
 
 @app.get("/api/metrics")
@@ -575,280 +590,236 @@ def _resolve_agent_ws_url(request: Request) -> str:
     return f"{scheme}://{request.url.hostname}:{port}/ws"
 
 
-@app.post("/api/deployments/prepare")
-async def api_prepare_deployment(request: Request):
-    body = await request.json()
-    hostname = (body.get("hostname") or "").strip()
-    if not hostname:
-        return JSONResponse({"error": "hostname is required"}, status_code=400)
+def _resolve_public_base_url(request: Request) -> str:
+    override = os.getenv("VM_AGENT_SERVER_PUBLIC_URL")
+    if override:
+        return override.rstrip("/")
+    return str(request.base_url).rstrip("/")
 
-    agent_id = (body.get("agent_id") or hostname).strip()
-    display_name = (body.get("display_name") or hostname).strip()
-    repo_url = (body.get("repo_url") or deployment_service.get_default_repo_url()).strip()
-    source_ref = (body.get("source_ref") or "main").strip() or "main"
-    requested_by = (body.get("requested_by") or "user").strip() or "user"
+
+def _get_guacamole_base_url() -> str:
+    return get_guacamole_request_base_url()
+
+
+def _get_guacamole_websocket_tunnel_url() -> str:
+    base_url = _get_guacamole_base_url()
+    if not base_url:
+        return ""
+    if base_url.startswith("https://"):
+        return f"wss://{base_url[len('https://'): ]}/websocket-tunnel"
+    if base_url.startswith("http://"):
+        return f"ws://{base_url[len('http://'): ]}/websocket-tunnel"
+    return f"{base_url}/websocket-tunnel"
+
+
+def _copy_guacamole_response_headers(headers: any) -> dict[str, str]:
+    forwarded: dict[str, str] = {}
+    for header_name in [
+        "Content-Type",
+        "Guacamole-Tunnel-Token",
+        "Guacamole-Status-Code",
+        "Guacamole-Error-Message",
+        "Cache-Control",
+    ]:
+        value = headers.get(header_name)
+        if value:
+            forwarded[header_name] = value
+    return forwarded
+
+
+def _extract_guacamole_tunnel_uuid(raw_query: str) -> str:
+    if raw_query == "connect":
+        return ""
+
+    for prefix in ("read:", "write:"):
+        if raw_query.startswith(prefix):
+            remainder = raw_query[len(prefix):]
+            if prefix == "read:":
+                return remainder.split(":", 1)[0].strip()
+            return remainder.strip()
+
+    return ""
+
+
+def _proxy_guacamole_tunnel_request(method: str, raw_query: str, body: bytes, headers: dict[str, str]) -> Response:
+    base_url = _get_guacamole_base_url()
+    if not base_url:
+        return JSONResponse({"error": "Guacamole bridge is not configured"}, status_code=503)
+
+    upstream_url = f"{base_url}/tunnel"
+    if raw_query:
+        upstream_url = f"{upstream_url}?{raw_query}"
+
+    request_headers = {
+        "Accept": headers.get("accept") or "*/*",
+    }
+    content_type = headers.get("content-type")
+    if content_type:
+        request_headers["Content-Type"] = content_type
+    tunnel_uuid = _extract_guacamole_tunnel_uuid(raw_query)
+    tunnel_token = headers.get("guacamole-tunnel-token") or guacamole_http_tunnel_tokens.get(tunnel_uuid, "")
+    if tunnel_token:
+        request_headers["Guacamole-Tunnel-Token"] = tunnel_token
+
+    upstream_request = UrlRequest(
+        upstream_url,
+        data=body if method != "GET" else None,
+        headers=request_headers,
+        method=method,
+    )
 
     try:
-        deployment = await deployment_service.prepare_deployment(
-            agent_id=agent_id,
-            hostname=hostname,
-            display_name=display_name,
-            repo_url=repo_url,
-            source_ref=source_ref,
-            requested_by=requested_by,
-            server_ws_url=_resolve_agent_ws_url(request),
+        upstream_response = urlopen(upstream_request, timeout=60)
+    except HTTPError as error:
+        error_body = error.read()
+        if tunnel_uuid and error.code in {404, 410}:
+            guacamole_http_tunnel_tokens.pop(tunnel_uuid, None)
+        return Response(
+            content=error_body,
+            status_code=error.code,
+            headers=_copy_guacamole_response_headers(error.headers),
+            media_type=error.headers.get("Content-Type"),
         )
-    except RuntimeError as exc:
-        active = await registry_db.get_active_deployment()
-        return JSONResponse({"error": str(exc), "active_deployment": active}, status_code=409)
-    return JSONResponse(deployment)
+    except URLError as error:
+        return JSONResponse({"error": f"Could not reach Guacamole tunnel: {error.reason}"}, status_code=502)
+    except OSError as error:
+        return JSONResponse({"error": f"Guacamole tunnel proxy failed: {error}"}, status_code=502)
 
+    response_headers = _copy_guacamole_response_headers(upstream_response.headers)
+    media_type = upstream_response.headers.get("Content-Type")
 
-@app.get("/api/deployments/config")
-async def api_get_deployment_config():
-    return JSONResponse(await deployment_service.get_prepare_config())
+    if raw_query == "connect":
+        connect_uuid = upstream_response.read().decode("utf-8").strip()
+        connect_tunnel_token = response_headers.get("Guacamole-Tunnel-Token", "").strip()
+        upstream_response.close()
+        if connect_uuid and connect_tunnel_token:
+            guacamole_http_tunnel_tokens[connect_uuid] = connect_tunnel_token
+        return Response(
+            content=connect_uuid,
+            status_code=upstream_response.status,
+            headers=response_headers,
+            media_type=media_type,
+        )
 
+    if method == "GET":
+        async def iter_chunks():
+            reader = getattr(upstream_response, "read1", upstream_response.read)
+            try:
+                while True:
+                    chunk = await asyncio.to_thread(reader, 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            except asyncio.CancelledError:
+                return
+            finally:
+                upstream_response.close()
 
-@app.get("/api/deployments")
-async def api_list_deployments(agent_id: str = None, limit: int = Query(default=100, le=500)):
-    return JSONResponse(await registry_db.get_deployments(agent_id=agent_id, limit=limit))
+        return StreamingResponse(
+            iter_chunks(),
+            status_code=upstream_response.status,
+            headers={
+                **response_headers,
+                "Cache-Control": response_headers.get("Cache-Control", "no-cache"),
+                "X-Accel-Buffering": "no",
+            },
+            media_type=media_type,
+        )
 
-
-@app.get("/api/deployments/{deployment_id}")
-async def api_get_deployment(deployment_id: str):
-    deployment = await registry_db.get_deployment(deployment_id)
-    if not deployment:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    return JSONResponse(deployment)
-
-
-@app.get("/api/deployments/{deployment_id}/installer")
-async def api_get_deployment_installer(deployment_id: str):
-    deployment = await registry_db.get_deployment(deployment_id)
-    if not deployment:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-
-    candidate_path = deployment.get("installer_copy_path") or deployment.get("install_script_path")
-    if not candidate_path:
-        return JSONResponse({"error": "Installer script not available"}, status_code=404)
-
-    installer_path = Path(candidate_path)
-    if not installer_path.exists():
-        return JSONResponse({"error": "Installer script not found on disk"}, status_code=404)
-
-    return PlainTextResponse(installer_path.read_text(encoding="utf-8"), media_type="text/plain")
-
-
-@app.get("/api/guacamole/config")
-async def api_guacamole_config():
-    return JSONResponse(get_guacamole_config())
-
-
-@app.get("/api/agents/{agent_id}/guacamole")
-async def api_agent_guacamole(agent_id: str):
-    state = agent_runtime.get_agent_state(agent_id)
-    if state is None:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    return JSONResponse(build_guacamole_session(agent_id, state))
-
-
-# ── Task REST API ──────────────────────────────────────────────────
-
-@app.post("/api/tasks")
-async def api_create_task(request: Request):
-    """Create and dispatch a task to an agent."""
-    body = await request.json()
-    task_id = uuid4().hex
-    agent_id = body.get("agent_id", "")
-    script = body.get("script", "")
-    name = body.get("name", "")
-    cwd = body.get("cwd", "")
-    timeout_sec = body.get("timeout_sec", 300)
-    session = body.get("session", "")
-    requested_by = body.get("requested_by", "user")
-    requested_from = request.client.host if request.client else ""
-
-    if not agent_id or not script:
-        return JSONResponse({"error": "agent_id and script are required"}, status_code=400)
-
-    task = await task_db.create_task(
-        task_id=task_id, agent_id=agent_id, script=script, name=name,
-        cwd=cwd, timeout_sec=timeout_sec, session=session,
-        requested_by=requested_by, requested_from=requested_from
+    response_body = upstream_response.read()
+    upstream_response.close()
+    if tunnel_uuid and raw_query.startswith("write:") and upstream_response.status >= 400:
+        guacamole_http_tunnel_tokens.pop(tunnel_uuid, None)
+    return Response(
+        content=response_body,
+        status_code=upstream_response.status,
+        headers=response_headers,
+        media_type=media_type,
     )
 
-    # Dispatch to agent
-    sent = await _send_to_agent(agent_id, ExecuteTaskEvent(
-        data=ExecuteTaskData(
-            task_id=task_id, script=script, cwd=cwd,
-            timeout_sec=timeout_sec, session=session,
-            env=body.get("env", {}),
-        )
-    ))
-    if not sent:
-        await task_db.update_task_status(task_id, "failed",
-                                          error="Agent not connected", actor="server")
-        task["status"] = "failed"
-        task["error"] = "Agent not connected"
 
-    return JSONResponse(task)
-
-
-@app.get("/api/tasks")
-async def api_list_tasks(
-    agent_id: str = None,
-    status: str = None,
-    limit: int = Query(default=50, le=500)
-):
-    rows = await task_db.get_tasks(agent_id, status, limit)
-    return JSONResponse(rows)
-
-
-@app.get("/api/tasks/{task_id}")
-async def api_get_task(task_id: str):
-    task = await task_db.get_task(task_id)
-    if not task:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    return JSONResponse(task)
-
-
-@app.post("/api/tasks/{task_id}/cancel")
-async def api_cancel_task(task_id: str, request: Request):
-    task = await task_db.get_task(task_id)
-    if not task:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    if task["status"] not in ("queued", "running"):
-        return JSONResponse({"error": f"Cannot cancel task in status {task['status']}"}, status_code=400)
-
-    sent = await _send_to_agent(task["agent_id"], CancelTaskEvent(
-        data=CancelTaskData(task_id=task_id)
-    ))
-    if sent:
-        await task_db.update_task_status(task_id, "cancelled",
-                                          actor=request.client.host if request.client else "user")
-    return JSONResponse({"ok": True, "sent": sent})
-
-
-@app.get("/api/tasks/{task_id}/log")
-async def api_task_log(task_id: str, offset: int = 0, limit: int = 0):
-    """Read task log from disk. offset=byte offset, limit=max bytes."""
-    result = task_db.read_log(task_id, offset, limit)
-    return JSONResponse(result)
-
-
-@app.get("/api/tasks/{task_id}/log/raw")
-async def api_task_log_raw(task_id: str):
-    """Download raw log file."""
-    result = task_db.read_log(task_id)
-    return PlainTextResponse(result["content"], media_type="text/plain")
-
-
-# ── Pipeline REST API ──────────────────────────────────────────────
-
-@app.post("/api/pipelines")
-async def api_create_pipeline(request: Request):
-    body = await request.json()
-    pipeline_id = uuid4().hex
-    name = body.get("name", "Unnamed Pipeline")
-    description = body.get("description", "")
-    steps = body.get("steps", [])
-    requested_by = body.get("created_by", "user")
-
-    if not steps:
-        return JSONResponse({"error": "At least one step is required"}, status_code=400)
-
-    pipeline = await task_db.create_pipeline(
-        pipeline_id, name, steps, description, requested_by)
-    return JSONResponse(pipeline)
-
-
-@app.get("/api/pipelines")
-async def api_list_pipelines(limit: int = Query(default=50, le=200)):
-    rows = await task_db.get_pipelines(limit)
-    return JSONResponse(rows)
-
-
-@app.get("/api/pipelines/{pipeline_id}")
-async def api_get_pipeline(pipeline_id: str):
-    pipeline = await task_db.get_pipeline(pipeline_id)
-    if not pipeline:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    return JSONResponse(pipeline)
-
-
-@app.post("/api/pipelines/{pipeline_id}/run")
-async def api_run_pipeline(pipeline_id: str, request: Request):
-    """Start a pipeline run — creates tasks for each step, dispatches the first."""
-    body = await request.json()
-    agent_id = body.get("agent_id", "")
-    session = body.get("session", "")
-    requested_by = body.get("requested_by", "user")
-    requested_from = request.client.host if request.client else ""
-
-    pipeline = await task_db.get_pipeline(pipeline_id)
-    if not pipeline:
-        return JSONResponse({"error": "Pipeline not found"}, status_code=404)
-    if not agent_id:
-        return JSONResponse({"error": "agent_id is required"}, status_code=400)
-
-    steps = pipeline.get("steps", [])
-    if not steps:
-        return JSONResponse({"error": "Pipeline has no steps"}, status_code=400)
-
-    run_id = uuid4().hex
-    run = await task_db.create_pipeline_run(
-        run_id, pipeline_id, agent_id, session, requested_by, requested_from)
-
-    # Create first step's task
-    first_step = steps[0]
-    task_id = uuid4().hex
-    await task_db.create_task(
-        task_id=task_id, agent_id=agent_id, script=first_step["script"],
-        name=first_step.get("name", "Step 0"), cwd=first_step.get("cwd", ""),
-        timeout_sec=first_step.get("timeout_sec", 300), session=session,
-        pipeline_run_id=run_id, step_index=first_step.get("step_index", 0),
-        requested_by=requested_by, requested_from=requested_from
+app.include_router(build_task_router(task_service, task_db, _send_to_agent))
+app.include_router(build_deployment_router(deployment_service, registry_db, _resolve_agent_ws_url))
+app.include_router(
+    build_guacamole_router(
+        agent_runtime.get_agent_state,
+        _resolve_public_base_url,
+        build_guacamole_proxy_tunnel_urls,
+        get_guacamole_config,
+        list_guacamole_connections,
+        build_guacamole_session,
+        inspect_guacamole_connection,
+        create_guacamole_client_session,
+        invalidate_guacamole_token,
+        _get_guacamole_base_url,
+        _proxy_guacamole_tunnel_request,
+        lambda: guacamole_websocket_proxy_supported,
+        guacamole_agent_tokens,
     )
-    await task_db.update_pipeline_run_status(run_id, "running", 0)
-
-    sent = await _send_to_agent(agent_id, ExecuteTaskEvent(
-        data=ExecuteTaskData(
-            task_id=task_id, script=first_step["script"],
-            cwd=first_step.get("cwd", ""),
-            timeout_sec=first_step.get("timeout_sec", 300),
-            session=session,
-        )
-    ))
-    if sent:
-        await task_db.update_task_status(task_id, "running", actor="server")
-    else:
-        await task_db.update_task_status(task_id, "failed",
-                                          error="Agent not connected", actor="server")
-        await task_db.update_pipeline_run_status(run_id, "failed", 0)
-
-    return JSONResponse({"run_id": run_id, "task_id": task_id, "sent": sent})
+)
 
 
-@app.get("/api/pipeline-runs/{run_id}")
-async def api_get_pipeline_run(run_id: str):
-    run = await task_db.get_pipeline_run(run_id)
-    if not run:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    return JSONResponse(run)
+@app.websocket("/api/guacamole/websocket-tunnel")
+async def api_guacamole_websocket_tunnel(ws: WebSocket):
+    global guacamole_websocket_proxy_supported
+    upstream_base = _get_guacamole_websocket_tunnel_url()
+    if not upstream_base:
+        await ws.close(code=1011, reason="Guacamole bridge is not configured")
+        return
 
+    raw_query = ws.scope.get("query_string", b"").decode("utf-8")
+    upstream_url = f"{upstream_base}?{raw_query}" if raw_query else upstream_base
 
-# ── Audit log API ──────────────────────────────────────────────────
+    await ws.accept()
 
-@app.get("/api/audit")
-async def api_audit_log(
-    entity_type: str = None,
-    entity_id: str = None,
-    limit: int = Query(default=100, le=1000)
-):
-    rows = await task_db.get_audit_log(entity_type, entity_id, limit)
-    return JSONResponse(rows)
+    try:
+        async with websocket_connect(upstream_url, max_size=None) as upstream:
+            guacamole_websocket_proxy_supported = True
+            async def client_to_upstream():
+                while True:
+                    message = await ws.receive()
+                    if message.get("type") == "websocket.disconnect":
+                        break
+                    if message.get("text") is not None:
+                        await upstream.send(message["text"])
+                    elif message.get("bytes") is not None:
+                        await upstream.send(message["bytes"])
 
+            async def upstream_to_client():
+                while True:
+                    payload = await upstream.recv()
+                    if isinstance(payload, bytes):
+                        await ws.send_bytes(payload)
+                    else:
+                        await ws.send_text(payload)
 
+            await asyncio.gather(client_to_upstream(), upstream_to_client())
+    except WebSocketDisconnect:
+        return
+    except InvalidStatus as error:
+        if getattr(error, "response", None) is not None and getattr(error.response, "status_code", None) == 404:
+            guacamole_websocket_proxy_supported = False
+            try:
+                await ws.close(code=1000, reason="Guacamole websocket tunnel unavailable")
+            except RuntimeError:
+                pass
+            return
+        logger.warning("Guacamole websocket tunnel proxy failed: %s", error)
+        try:
+            await ws.close(code=1011, reason="Guacamole websocket tunnel failed")
+        except RuntimeError:
+            pass
+    except ConnectionClosed:
+        try:
+            await ws.close()
+        except RuntimeError:
+            pass
+    except Exception as error:
+        logger.warning("Guacamole websocket tunnel proxy failed: %s", error)
+        try:
+            await ws.close(code=1011, reason="Guacamole websocket tunnel failed")
+        except RuntimeError:
+            pass
 if __name__ == "__main__":
     #disable_rdp_publisher_warning()
     #add_trusted_rdp_host("DESKTOP-JJULF7D")

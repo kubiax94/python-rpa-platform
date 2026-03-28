@@ -11,10 +11,15 @@ import textwrap
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vm_agent_server.src.agent_registry_db import AgentRegistryDB, hash_token
 from vm_agent_server.src.task_db import TaskDB
+from vm_agent_server.src.task_dispatcher import TaskDispatchResult
+from vm_agent_server.src.task_models import DeploymentTaskSpec, TaskBuilder
+
+if TYPE_CHECKING:
+    from vm_agent_server.src.task_service import TaskService
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +32,10 @@ class DeploymentService:
         self._artifacts_root = repo_root / "artifacts" / "deployments"
         self._tasks: dict[str, asyncio.Task] = {}
         self._active_lock = asyncio.Lock()
+        self._task_service: TaskService | None = None
+
+    def set_task_service(self, task_service: "TaskService") -> None:
+        self._task_service = task_service
 
     def get_default_repo_url(self) -> str:
         override = os.getenv("VM_AGENT_REPO_URL")
@@ -98,23 +107,67 @@ class DeploymentService:
             last_deployment_id=deployment_id,
         )
         await self._registry_db.set_bootstrap_token(agent_id, hash_token(bootstrap_token), bootstrap_expires_at)
-        await self._task_db.create_task(
-            task_id=task_id,
-            agent_id=agent_id,
-            script=f"prepare_deployment repo={repo_url or self.get_default_repo_url()} ref={source_ref}",
-            name=f"Prepare deployment for {hostname}",
-            cwd=str(self._repo_root),
-            timeout_sec=7200,
-            requested_by=requested_by,
-            requested_from="server",
+        task_spec = (
+            TaskBuilder.deployment(agent_id, "prepare", task_id=task_id)
+            .name(f"Prepare deployment for {hostname}")
+            .cwd(str(self._repo_root))
+            .timeout(7200)
+            .requested_by(requested_by)
+            .requested_from("server")
+            .payload_field("deployment_id", deployment_id)
+            .payload_field("repo_url", repo_url or self.get_default_repo_url())
+            .payload_field("source_ref", source_ref)
+            .payload_field("hostname", hostname)
+            .payload_field("display_name", display_name)
+            .payload_field("agent_id", agent_id)
+            .payload_field("server_ws_url", server_ws_url)
+            .payload_field("bootstrap_token", bootstrap_token)
+            .payload_field("bootstrap_expires_at", bootstrap_expires_at)
+            .component(
+                "deployment",
+                deployment_id=deployment_id,
+                agent_id=agent_id,
+                repo_url=repo_url or self.get_default_repo_url(),
+                source_ref=source_ref,
+                hostname=hostname,
+                display_name=display_name,
+                server_ws_url=server_ws_url,
+                bootstrap_token=bootstrap_token,
+                bootstrap_expires_at=bootstrap_expires_at,
+            )
+            .build()
         )
-        await self._task_db.update_task_status(task_id, "running", actor="server")
         await self._registry_db.create_deployment(deployment_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id)
 
-        task = asyncio.create_task(
+        if self._task_service is None:
+            raise RuntimeError("TaskService is not configured for DeploymentService")
+        await self._task_service.create_and_dispatch(task_spec)
+
+        deployment = await self._registry_db.get_deployment(deployment_id)
+        return deployment or {"id": deployment_id, "status": "queued"}
+
+    async def dispatch_task(self, task: DeploymentTaskSpec) -> TaskDispatchResult:
+        if task.operation != "prepare":
+            return TaskDispatchResult(accepted=False, status="failed", error=f"Unsupported deployment task operation: {task.operation}")
+
+        payload = task.payload
+        deployment_id = str(payload.get("deployment_id") or "").strip()
+        hostname = str(payload.get("hostname") or "").strip()
+        display_name = str(payload.get("display_name") or hostname).strip()
+        repo_url = str(payload.get("repo_url") or self.get_default_repo_url()).strip()
+        source_ref = str(payload.get("source_ref") or "main").strip() or "main"
+        server_ws_url = str(payload.get("server_ws_url") or "").strip()
+        bootstrap_token = str(payload.get("bootstrap_token") or "").strip()
+        bootstrap_expires_at = int(payload.get("bootstrap_expires_at") or 0)
+        agent_id = str(payload.get("agent_id") or task.agent_id).strip()
+
+        if not deployment_id or not hostname or not agent_id or not server_ws_url or not bootstrap_token or bootstrap_expires_at <= 0:
+            return TaskDispatchResult(accepted=False, status="failed", error="Deployment task payload is incomplete")
+
+        prepare_task = asyncio.create_task(
             self._run_prepare(
                 deployment_id=deployment_id,
-                task_id=task_id,
+                task_id=task.id,
                 agent_id=agent_id,
                 hostname=hostname,
                 display_name=display_name,
@@ -125,11 +178,9 @@ class DeploymentService:
                 bootstrap_expires_at=bootstrap_expires_at,
             )
         )
-        self._tasks[deployment_id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(deployment_id, None))
-
-        deployment = await self._registry_db.get_deployment(deployment_id)
-        return deployment or {"id": deployment_id, "status": "queued"}
+        self._tasks[deployment_id] = prepare_task
+        prepare_task.add_done_callback(lambda _: self._tasks.pop(deployment_id, None))
+        return TaskDispatchResult(accepted=True, status="running")
 
     async def _run_prepare(
         self,
@@ -321,55 +372,13 @@ class DeploymentService:
                 [string]$PackagePath = ""
             )
 
-            function Test-PathSafe {{
-                param([string]$CandidatePath)
-                if ([string]::IsNullOrWhiteSpace($CandidatePath)) {{
-                    return $false
-                }}
-
-                try {{
-                    return Test-Path -LiteralPath $CandidatePath
-                }} catch {{
-                    return $false
-                }}
-            }}
-
-            function Normalize-DirectoryPath {{
-                param([string]$CandidatePath)
-                if ([string]::IsNullOrWhiteSpace($CandidatePath)) {{
-                    return $null
-                }}
-
-                $resolved = Resolve-Path -LiteralPath $CandidatePath -ErrorAction SilentlyContinue
-                if ($resolved) {{
-                    return $resolved.Path
-                }}
-
-                $combined = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $CandidatePath))
-                $resolvedCombined = Resolve-Path -LiteralPath $combined -ErrorAction SilentlyContinue
-                if ($resolvedCombined) {{
-                    return $resolvedCombined.Path
-                }}
-
-                return $combined
-            }}
-
             function Test-PackageDirectory {{
                 param([string]$CandidatePath)
                 if ([string]::IsNullOrWhiteSpace($CandidatePath)) {{
                     return $false
                 }}
 
-                $normalizedPath = Normalize-DirectoryPath -CandidatePath $CandidatePath
-                if ([string]::IsNullOrWhiteSpace($normalizedPath)) {{
-                    return $false
-                }}
-
-                if (-not (Test-PathSafe -CandidatePath $normalizedPath)) {{
-                    return $false
-                }}
-
-                $item = Get-Item -LiteralPath $normalizedPath -ErrorAction SilentlyContinue
+                $item = Get-Item -LiteralPath $CandidatePath -ErrorAction SilentlyContinue
                 if (-not $item) {{
                     return $false
                 }}
@@ -385,11 +394,14 @@ class DeploymentService:
                 }}
 
                 $exeCandidate = Join-Path $directoryPath "agent_service.exe"
-                return Test-PathSafe -CandidatePath $exeCandidate
+                return Test-Path -LiteralPath $exeCandidate -ErrorAction SilentlyContinue
             }}
 
             function Resolve-PackagePath {{
                 param([string]$RootPath, [string]$DeploymentId)
+                if ([string]::IsNullOrWhiteSpace($RootPath)) {{
+                    return $null
+                }}
                 return Join-Path (Join-Path $RootPath $DeploymentId) "package"
             }}
 
@@ -397,37 +409,48 @@ class DeploymentService:
                 param([string]$PackageRoot)
 
                 $bootstrapPath = Join-Path $PackageRoot "agent.bootstrap.json"
-                if (-not (Test-PathSafe -CandidatePath $bootstrapPath)) {{
+                if (-not (Test-Path -LiteralPath $bootstrapPath -ErrorAction SilentlyContinue)) {{
                     return $null
                 }}
 
                 try {{
                     return Get-Content -LiteralPath $bootstrapPath -Raw | ConvertFrom-Json
                 }} catch {{
-                    throw "Failed to parse bootstrap metadata from ${bootstrapPath}: $($_.Exception.Message)"
+                    throw ("Failed to parse bootstrap metadata from {{0}}: {{1}}" -f $bootstrapPath, $_.Exception.Message)
                 }}
             }}
 
-            function Resolve-LocalPackagePath {{
-                param([string]$ExplicitPath)
+            function Resolve-PackageRoot {{
+                param(
+                    [string]$ExplicitPath,
+                    [string]$ScriptRoot,
+                    [string]$ArtifactRoot,
+                    [string]$DeploymentId
+                )
 
                 $candidates = @()
-                if ($ExplicitPath) {{
+                if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {{
                     $candidates += $ExplicitPath
                     $candidates += (Join-Path $ExplicitPath "package")
                 }}
 
-                if ($PSScriptRoot) {{
-                    $candidates += $PSScriptRoot
-                    $candidates += (Join-Path $PSScriptRoot "package")
+                if (-not [string]::IsNullOrWhiteSpace($ScriptRoot)) {{
+                    $candidates += $ScriptRoot
+                    $candidates += (Join-Path $ScriptRoot "package")
+
+                    $artifactsRoot = Split-Path $ScriptRoot -Parent
+                    if (-not [string]::IsNullOrWhiteSpace($artifactsRoot)) {{
+                        $candidates += (Join-Path $artifactsRoot (Join-Path "deployments" (Join-Path $DeploymentId "package")))
+                    }}
                 }}
 
-                $candidates += (Get-Location).Path
-                $candidates += (Join-Path (Get-Location).Path "package")
+                if (-not [string]::IsNullOrWhiteSpace($ArtifactRoot)) {{
+                    $candidates += (Resolve-PackagePath -RootPath $ArtifactRoot -DeploymentId $DeploymentId)
+                }}
 
                 foreach ($candidate in $candidates) {{
                     if (Test-PackageDirectory -CandidatePath $candidate) {{
-                        $item = Get-Item -LiteralPath (Normalize-DirectoryPath -CandidatePath $candidate) -ErrorAction SilentlyContinue
+                        $item = Get-Item -LiteralPath $candidate -ErrorAction SilentlyContinue
                         if ($item -and $item.PSIsContainer) {{
                             return $item.FullName
                         }}
@@ -440,32 +463,9 @@ class DeploymentService:
                 return $null
             }}
 
-            function Mount-ArtifactShare {{
-                param([string]$RootPath)
-                $driveName = "AGENTART"
-                if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) {{
-                    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
-                }}
-
-                $credential = Get-Credential -Message "Credentials required to read deployment artifacts"
-                New-PSDrive -Name $driveName -PSProvider FileSystem -Root $RootPath -Credential $credential -Scope Script | Out-Null
-                return "$driveName`:"
-            }}
-
-            $PackageRoot = Resolve-LocalPackagePath -ExplicitPath $PackagePath
+            $PackageRoot = Resolve-PackageRoot -ExplicitPath $PackagePath -ScriptRoot $PSScriptRoot -ArtifactRoot $ArtifactSourceRoot -DeploymentId $ArtifactId
             if (-not $PackageRoot) {{
-                $PackageRoot = Resolve-PackagePath -RootPath $ArtifactSourceRoot -DeploymentId $ArtifactId
-            }}
-
-            if (-not (Test-PathSafe -CandidatePath $PackageRoot)) {{
-                if (-not [string]::IsNullOrWhiteSpace($ArtifactSourceRoot) -and $ArtifactSourceRoot.StartsWith("\\")) {{
-                    $mountedRoot = Mount-ArtifactShare -RootPath $ArtifactSourceRoot
-                    $PackageRoot = Resolve-PackagePath -RootPath $mountedRoot -DeploymentId $ArtifactId
-                }}
-            }}
-
-            if (-not (Test-PathSafe -CandidatePath $PackageRoot)) {{
-                throw "Artifact package not found. Provide -PackagePath with a local package folder or ensure the share path is reachable: $ArtifactSourceRoot"
+                throw "Artifact package not found. Use -PackagePath for a local package folder, or run this installer from artifacts\\latest with a sibling deployments\\<artifactId>\\package folder."
             }}
 
             $BootstrapMetadata = Get-BootstrapMetadata -PackageRoot $PackageRoot

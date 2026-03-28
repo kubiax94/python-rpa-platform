@@ -19,10 +19,13 @@ import os
 import time
 import asyncio
 import logging
+import json
 from pathlib import Path
 from typing import Optional
 
 import aiosqlite
+
+from vm_agent_server.src.task_models import TASK_KIND_AGENT, TaskComponent, TaskSpec
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     requested_from  TEXT DEFAULT '',         -- IP or source identifier
     created_at      INTEGER NOT NULL,
     started_at      INTEGER,
-    completed_at    INTEGER
+    completed_at    INTEGER,
+    kind            TEXT NOT NULL DEFAULT 'agent',
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    components_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -142,6 +148,9 @@ class TaskDB:
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(TASK_SCHEMA)
         await self._ensure_column("tasks", "pid", "INTEGER")
+        await self._ensure_column("tasks", "kind", "TEXT NOT NULL DEFAULT 'agent'")
+        await self._ensure_column("tasks", "payload_json", "TEXT NOT NULL DEFAULT '{}'")
+        await self._ensure_column("tasks", "components_json", "TEXT NOT NULL DEFAULT '[]'")
         await self._db.commit()
         logger.info(f"TaskDB started: {self._db_path}, logs: {self._logs_dir}")
 
@@ -161,26 +170,45 @@ class TaskDB:
 
     # ── Task CRUD ──────────────────────────────────────────────────
 
-    async def create_task(self, task_id: str, agent_id: str, script: str,
-                          name: str = "", cwd: str = "", timeout_sec: int = 300,
-                          session: str = "", pipeline_run_id: str = None,
-                          step_index: int = 0, requested_by: str = "system",
-                          requested_from: str = "") -> dict:
+    async def create_task(self, task: TaskSpec) -> dict:
         now = int(time.time())
         await self._db.execute(
             """INSERT INTO tasks 
                (id, pipeline_run_id, step_index, agent_id, session, name, script, cwd,
-                timeout_sec, status, requested_by, requested_from, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (task_id, pipeline_run_id, step_index, agent_id, session, name, script,
-             cwd, timeout_sec, "queued", requested_by, requested_from, now)
+                timeout_sec, status, requested_by, requested_from, created_at, kind,
+                payload_json, components_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                task.id,
+                task.pipeline_run_id,
+                task.step_index,
+                task.agent_id,
+                task.session,
+                task.name,
+                task.script,
+                task.cwd,
+                task.timeout_sec,
+                "queued",
+                task.requested_by,
+                task.requested_from,
+                now,
+                task.kind,
+                json.dumps(task.payload),
+                json.dumps([component.to_dict() for component in task.components]),
+            )
         )
         await self._db.commit()
 
-        await self._audit("task", task_id, "created", requested_by, 
-                          f"script_len={len(script)}, agent={agent_id}", requested_from)
+        await self._audit(
+            "task",
+            task.id,
+            "created",
+            task.requested_by,
+            f"kind={task.kind}, script_len={len(task.script)}, agent={task.agent_id}",
+            task.requested_from,
+        )
 
-        return {"id": task_id, "status": "queued", "created_at": now}
+        return task.to_api_dict(status="queued", created_at=now)
 
     async def update_task_status(self, task_id: str, status: str,
                                   pid: int = None, exit_code: int = None, error: str = None,
@@ -229,8 +257,7 @@ class TaskDB:
             row = await cursor.fetchone()
             if not row:
                 return None
-            cols = [d[0] for d in cursor.description]
-            return dict(zip(cols, row))
+            return self._map_task_row(cursor.description, row)
 
     async def get_tasks(self, agent_id: str = None, status: str = None,
                         limit: int = 50) -> list[dict]:
@@ -247,9 +274,8 @@ class TaskDB:
 
         rows = []
         async with self._db.execute(query, params) as cursor:
-            cols = [d[0] for d in cursor.description]
             async for row in cursor:
-                rows.append(dict(zip(cols, row)))
+                rows.append(self._map_task_row(cursor.description, row))
         return rows
 
     # ── Pipeline CRUD ──────────────────────────────────────────────
@@ -366,11 +392,44 @@ class TaskDB:
             "SELECT * FROM tasks WHERE pipeline_run_id = ? ORDER BY step_index",
             (run_id,)
         ) as cursor:
-            cols = [d[0] for d in cursor.description]
             async for row in cursor:
-                tasks.append(dict(zip(cols, row)))
+                tasks.append(self._map_task_row(cursor.description, row))
         run["tasks"] = tasks
         return run
+
+    def _map_task_row(self, description, row) -> dict:
+        cols = [d[0] for d in description]
+        task = dict(zip(cols, row))
+        task["kind"] = task.get("kind") or TASK_KIND_AGENT
+        task["payload"] = self._decode_json(task.pop("payload_json", "{}"), default={})
+        raw_components = self._decode_json(task.pop("components_json", "[]"), default=[])
+        task["components"] = self._normalize_components(raw_components)
+        return task
+
+    @staticmethod
+    def _decode_json(raw: object, *, default):
+        if raw in (None, ""):
+            return default
+        if not isinstance(raw, str):
+            return raw
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("Failed to decode task JSON payload")
+            return default
+
+    @staticmethod
+    def _normalize_components(raw_components: object) -> list[dict]:
+        if not isinstance(raw_components, list):
+            return []
+
+        components: list[dict] = []
+        for raw_component in raw_components:
+            try:
+                components.append(TaskComponent.from_dict(raw_component).to_dict())
+            except (TypeError, ValueError):
+                continue
+        return components
 
     # ── Disk log management ────────────────────────────────────────
 
