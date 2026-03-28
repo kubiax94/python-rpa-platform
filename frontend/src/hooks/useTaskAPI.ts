@@ -25,6 +25,12 @@ export interface Task {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+  kind?: string;
+  payload?: Record<string, unknown>;
+  components?: Array<{
+    type: string;
+    config: Record<string, unknown>;
+  }>;
 }
 
 export interface Pipeline {

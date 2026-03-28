@@ -41,16 +41,36 @@ export function SettingsPage() {
               <span className="font-mono text-slate-300 break-all text-right">{guacamoleConfig?.base_url || "-"}</span>
             </div>
             <div className="flex justify-between gap-4">
+              <span className="text-slate-400">API user configured</span>
+              <span className="font-mono text-slate-300">{guacamoleConfig?.auth_username_configured ? "yes" : "no"}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-slate-400">API password configured</span>
+              <span className="font-mono text-slate-300">{guacamoleConfig?.auth_password_configured ? "yes" : "no"}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-slate-400">Auth provider</span>
+              <span className="font-mono text-slate-300">{guacamoleConfig?.auth_provider || "-"}</span>
+            </div>
+            <div className="flex justify-between gap-4">
               <span className="text-slate-400">Default mapping</span>
               <span className="font-mono text-slate-300">{guacamoleConfig?.default_connection_mode || "-"}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-slate-400">Connection type</span>
+              <span className="font-mono text-slate-300">{guacamoleConfig?.connection_type || "-"}</span>
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-slate-400">Static mappings</span>
               <span className="font-mono text-slate-300">{guacamoleConfig?.mapping_count ?? 0}</span>
             </div>
             <div className="flex justify-between gap-4">
-              <span className="text-slate-400">Embed allowed</span>
-              <span className="font-mono text-slate-300">{guacamoleConfig?.allow_embed ? "yes" : "no"}</span>
+              <span className="text-slate-400">WebSocket tunnel</span>
+              <span className="font-mono text-slate-300 break-all text-right">{guacamoleConfig?.websocket_tunnel_url || "-"}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-slate-400">HTTP tunnel</span>
+              <span className="font-mono text-slate-300 break-all text-right">{guacamoleConfig?.http_tunnel_url || "-"}</span>
             </div>
           </div>
           {!!guacamoleConfig?.notes?.length && (

@@ -7,7 +7,7 @@ import { getAgentConnection, getAgentSessions, getSessionProcessCount, isAgentOn
 import { ActiveTaskNotifications } from "./ActiveTaskNotifications";
 import { SessionPanel } from "@/components/SessionPanel";
 import { CommandPanel } from "./CommandPanel";
-import { GuacamolePanel } from "./GuacamolePanel";
+import { GuacamolePanel } from "@/components/GuacamolePanel";
 import { MonitoredView } from "./MonitoredView";
 import { OverviewPanel } from "./OverviewPanel";
 
@@ -216,10 +216,6 @@ export function AgentDetail({ agentId, state, tasks, sendCommand, latestScreensh
         <MonitoredView agentId={agentId} state={state} />
       )}
 
-      {activeTab === "remote" && (
-        <GuacamolePanel agentId={agentId} />
-      )}
-
       {activeTab === "commands" && (
         <div>
           {agentOnline ? (
@@ -231,6 +227,8 @@ export function AgentDetail({ agentId, state, tasks, sendCommand, latestScreensh
           )}
         </div>
       )}
+
+      <GuacamolePanel agentId={agentId} active={activeTab === "remote"} />
     </div>
   );
 }
