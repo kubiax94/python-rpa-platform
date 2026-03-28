@@ -20,7 +20,7 @@ class AgentNamedPipe {
 	HRESULT									Initialize(ICredentialProviderEvents* pcpe, UINT_PTR upAdviceContext);
 	HRESULT									ListenForCommand();
 	CSampleCredential*						HasData(); // return credential if available, else nullptr, password is encrypted
-	CSampleCredential*					TakeCredential();
+	CSampleCredential*						TakeCredential();
 	~AgentNamedPipe();
 
 private:
