@@ -13,5 +13,10 @@ dependencies = [
     "Pillow>=10.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "httpx>=0.27",
+]
+
 [tool.setuptools]
 packages = ["vm_agent", "shared", "vm_agent_server"]
