@@ -11,6 +11,12 @@ interface SidebarProps {
   connected: boolean;
   agentCount: number;
   activeTaskCount: number;
+  guacamoleSession?: {
+    agentId: string;
+    connected: boolean;
+    minimized: boolean;
+    fullscreen: boolean;
+  } | null;
 }
 
 const menuItems: { id: MenuPage; label: string; icon: ReactNode }[] = [
@@ -53,7 +59,7 @@ const menuItems: { id: MenuPage; label: string; icon: ReactNode }[] = [
   },
 ];
 
-export function Sidebar({ activePage, onNavigate, connected, agentCount, activeTaskCount }: SidebarProps) {
+export function Sidebar({ activePage, onNavigate, connected, agentCount, activeTaskCount, guacamoleSession }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
 
   return (
@@ -105,6 +111,24 @@ export function Sidebar({ activePage, onNavigate, connected, agentCount, activeT
 
       {/* Bottom — connection + collapse */}
       <div className="border-t border-slate-700/50 px-3 py-3 space-y-2">
+        {!collapsed && guacamoleSession && (
+          <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-200">RDP</span>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                guacamoleSession.connected
+                  ? "bg-emerald-500/15 text-emerald-300"
+                  : "bg-blue-500/15 text-blue-200"
+              }`}>
+                {guacamoleSession.connected ? "Live" : "Opening"}
+              </span>
+            </div>
+            <p className="mt-2 truncate text-xs font-medium text-slate-100">{guacamoleSession.agentId}</p>
+            <p className="mt-1 text-[11px] text-slate-400">
+              {guacamoleSession.fullscreen ? "Fullscreen" : guacamoleSession.minimized ? "Minimized" : "Docked"}
+            </p>
+          </div>
+        )}
         {!collapsed && <ConnectionStatus connected={connected} agentCount={agentCount} />}
         <button
           onClick={() => setCollapsed(!collapsed)}

@@ -10,10 +10,13 @@ import subprocess
 import textwrap
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vm_agent_server.src.agent_registry_db import AgentRegistryDB, hash_token
+from vm_agent_server.src.guacamole_bridge import provision_guacamole_agent_target_with_diagnostics
+from vm_agent_server.src.guacamole_mapping import build_agent_guacamole_mapping
 from vm_agent_server.src.task_db import TaskDB
 from vm_agent_server.src.task_dispatcher import TaskDispatchResult
 from vm_agent_server.src.task_models import DeploymentTaskSpec, TaskBuilder
@@ -81,6 +84,13 @@ class DeploymentService:
         agent_id: str,
         hostname: str,
         display_name: str,
+        guacamole_target_host: str,
+        guacamole_username: str,
+        guacamole_domain: str,
+        guacamole_password: str,
+        guacamole_secret: str,
+        guacamole_group_name: str,
+        guacamole_connection_name: str,
         repo_url: str,
         source_ref: str,
         requested_by: str,
@@ -97,6 +107,26 @@ class DeploymentService:
         task_id = uuid.uuid4().hex
         bootstrap_token = uuid.uuid4().hex + uuid.uuid4().hex
         bootstrap_expires_at = int(time.time()) + 3600
+        guacamole_mapping = build_agent_guacamole_mapping(
+            agent_id=agent_id,
+            hostname=hostname,
+            display_name=display_name,
+            target_host=guacamole_target_host,
+            username=guacamole_username,
+            domain=guacamole_domain,
+            group_name=guacamole_group_name,
+            connection_name=guacamole_connection_name,
+        )
+        guacamole_mapping, guacamole_provisioning = await asyncio.to_thread(
+            provision_guacamole_agent_target_with_diagnostics,
+            agent_id,
+            hostname,
+            guacamole_mapping,
+            template_values={
+                "password": guacamole_password,
+                "secret": guacamole_secret,
+            },
+        )
 
         await self._registry_db.upsert_agent(
             agent_id,
@@ -105,6 +135,7 @@ class DeploymentService:
             status="provisioning",
             connection_status="offline",
             last_deployment_id=deployment_id,
+            metadata={"guacamole": guacamole_mapping},
         )
         await self._registry_db.set_bootstrap_token(agent_id, hash_token(bootstrap_token), bootstrap_expires_at)
         task_spec = (
@@ -120,6 +151,7 @@ class DeploymentService:
             .payload_field("hostname", hostname)
             .payload_field("display_name", display_name)
             .payload_field("agent_id", agent_id)
+            .payload_field("guacamole", guacamole_mapping)
             .payload_field("server_ws_url", server_ws_url)
             .payload_field("bootstrap_token", bootstrap_token)
             .payload_field("bootstrap_expires_at", bootstrap_expires_at)
@@ -131,20 +163,79 @@ class DeploymentService:
                 source_ref=source_ref,
                 hostname=hostname,
                 display_name=display_name,
+                guacamole=guacamole_mapping,
                 server_ws_url=server_ws_url,
                 bootstrap_token=bootstrap_token,
                 bootstrap_expires_at=bootstrap_expires_at,
             )
             .build()
         )
-        await self._registry_db.create_deployment(deployment_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id)
+        await self._registry_db.create_deployment(
+            deployment_id,
+            agent_id,
+            hostname,
+            repo_url,
+            source_ref,
+            requested_by,
+            task_id,
+            metadata={"guacamole_provisioning": guacamole_provisioning},
+        )
 
         if self._task_service is None:
             raise RuntimeError("TaskService is not configured for DeploymentService")
-        await self._task_service.create_and_dispatch(task_spec)
+        submission = await self._task_service.create_and_dispatch(task_spec)
+        if not submission.dispatch.accepted:
+            completed_at = int(time.time())
+            error = submission.dispatch.error or "Deployment dispatch failed"
+            await self._registry_db.update_deployment(
+                deployment_id,
+                status="failed",
+                error=error,
+                completed_at=completed_at,
+                task_id=task_id,
+            )
+            await self._registry_db.upsert_agent(
+                agent_id,
+                hostname=hostname,
+                display_name=display_name,
+                status="deploy_failed",
+                connection_status="offline",
+                last_deployment_id=deployment_id,
+            )
 
         deployment = await self._registry_db.get_deployment(deployment_id)
         return deployment or {"id": deployment_id, "status": "queued"}
+
+    async def recover_interrupted_deployments(self) -> int:
+        recovered = 0
+        now = int(time.time())
+        active_deployments = await self._registry_db.get_active_deployments()
+        for deployment in active_deployments:
+            deployment_id = str(deployment.get("id") or "").strip()
+            if not deployment_id or deployment_id in self._tasks:
+                continue
+
+            agent_id = str(deployment.get("agent_id") or "").strip()
+            hostname = str(deployment.get("hostname") or "").strip()
+            status = str(deployment.get("status") or "queued").strip() or "queued"
+            error = f"Deployment prepare was interrupted while in '{status}'. The server was restarted before the local build task completed."
+            logger.warning("Recovering interrupted deployment %s stuck in status=%s", deployment_id, status)
+            await self._registry_db.update_deployment(
+                deployment_id,
+                status="failed",
+                error=error,
+                completed_at=now,
+            )
+            if agent_id:
+                await self._registry_db.upsert_agent(
+                    agent_id,
+                    hostname=hostname,
+                    status="deploy_failed",
+                    connection_status="offline",
+                    last_deployment_id=deployment_id,
+                )
+            recovered += 1
+        return recovered
 
     async def dispatch_task(self, task: DeploymentTaskSpec) -> TaskDispatchResult:
         if task.operation != "prepare":
@@ -160,9 +251,13 @@ class DeploymentService:
         bootstrap_token = str(payload.get("bootstrap_token") or "").strip()
         bootstrap_expires_at = int(payload.get("bootstrap_expires_at") or 0)
         agent_id = str(payload.get("agent_id") or task.agent_id).strip()
+        guacamole_mapping = payload.get("guacamole") if isinstance(payload.get("guacamole"), dict) else {}
 
         if not deployment_id or not hostname or not agent_id or not server_ws_url or not bootstrap_token or bootstrap_expires_at <= 0:
             return TaskDispatchResult(accepted=False, status="failed", error="Deployment task payload is incomplete")
+
+        started_at = int(time.time())
+        await self._registry_db.update_deployment(deployment_id, status="building", started_at=started_at, task_id=task.id)
 
         prepare_task = asyncio.create_task(
             self._run_prepare(
@@ -171,6 +266,7 @@ class DeploymentService:
                 agent_id=agent_id,
                 hostname=hostname,
                 display_name=display_name,
+                guacamole_mapping=guacamole_mapping,
                 repo_url=repo_url,
                 source_ref=source_ref,
                 server_ws_url=server_ws_url,
@@ -190,6 +286,7 @@ class DeploymentService:
         agent_id: str,
         hostname: str,
         display_name: str,
+        guacamole_mapping: dict[str, Any],
         repo_url: str,
         source_ref: str,
         server_ws_url: str,
@@ -201,9 +298,6 @@ class DeploymentService:
         worktree_dir = artifact_root / "_worktree"
         package_dir = artifact_root / "package"
         latest_dir = self._repo_root / "artifacts" / "latest"
-        started_at = int(time.time())
-
-        await self._registry_db.update_deployment(deployment_id, status="building", started_at=started_at, task_id=task_id)
         self._append_task_log(task_id, f"Starting deployment prepare for {hostname} ({source_ref})")
 
         try:
@@ -250,6 +344,7 @@ class DeploymentService:
                 "agent_id": agent_id,
                 "hostname": hostname,
                 "display_name": display_name,
+                "guacamole": guacamole_mapping,
                 "server_url": server_ws_url,
                 "bootstrap_token": bootstrap_token,
                 "bootstrap_expires_at": bootstrap_expires_at,
@@ -267,6 +362,9 @@ class DeploymentService:
             installer_copy_path.write_text(self._build_install_script(deployment_id), encoding="utf-8")
             (latest_dir / "install-latest.ps1").write_text(self._build_install_script(deployment_id), encoding="utf-8")
 
+            package_zip_path = artifact_root / "package.zip"
+            self._create_package_zip(package_dir, package_zip_path)
+
             manifest_path = package_dir / "deployment-manifest.json"
             manifest_path.write_text(
                 json.dumps(
@@ -274,10 +372,13 @@ class DeploymentService:
                         "deployment_id": deployment_id,
                         "agent_id": agent_id,
                         "hostname": hostname,
+                        "display_name": display_name,
+                        "guacamole": guacamole_mapping,
                         "repo_url": repo_url,
                         "source_ref": source_ref,
                         "commit_sha": commit_sha,
                         "artifact_exe": artifact_exe.name,
+                        "package_zip": package_zip_path.name,
                         "bootstrap_file": bootstrap_path.name,
                         "install_script": install_script_path.name,
                     },
@@ -293,6 +394,7 @@ class DeploymentService:
                 commit_sha=commit_sha,
                 artifact_dir=str(package_dir),
                 artifact_exe_path=str(artifact_exe),
+                package_zip_path=str(package_zip_path),
                 bootstrap_path=str(bootstrap_path),
                 install_script_path=str(install_script_path),
                 installer_copy_path=str(installer_copy_path),
@@ -359,6 +461,13 @@ class DeploymentService:
         if not content:
             return
         self._task_db.append_log(task_id, "stdout", content, 0)
+
+    def _create_package_zip(self, package_dir: Path, zip_path: Path) -> None:
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for source_path in sorted(package_dir.rglob("*")):
+                if source_path.is_file():
+                    archive.write(source_path, arcname=source_path.relative_to(package_dir))
 
     def _build_install_script(self, deployment_id: str) -> str:
         artifact_share_root = self.get_artifact_share_root().replace("\"", "`\"")
@@ -465,7 +574,7 @@ class DeploymentService:
 
             $PackageRoot = Resolve-PackageRoot -ExplicitPath $PackagePath -ScriptRoot $PSScriptRoot -ArtifactRoot $ArtifactSourceRoot -DeploymentId $ArtifactId
             if (-not $PackageRoot) {{
-                throw "Artifact package not found. Use -PackagePath for a local package folder, or run this installer from artifacts\\latest with a sibling deployments\\<artifactId>\\package folder."
+                throw "Artifact package not found. Download package.zip from the server, extract it locally, and run install.ps1 with -PackagePath pointing at the extracted package folder."
             }}
 
             $BootstrapMetadata = Get-BootstrapMetadata -PackageRoot $PackageRoot

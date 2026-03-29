@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { buildInstallCommand, buildLocalInstallCommand, getDeploymentInstallerUrl, useDeployment, useDeploymentConfig, useDeployments } from "@/hooks/useDeploymentAPI";
+import { buildLocalInstallCommand, getDeploymentInstallerUrl, getDeploymentPackageUrl, useDeployment, useDeploymentProvisioning, useDeployments } from "@/hooks/useDeploymentAPI";
+import { GuacamoleProvisioningSummary } from "@/components/GuacamoleProvisioningSummary";
 
 function formatDateTime(ts: number | null | undefined): string {
   if (!ts) return "-";
@@ -18,13 +19,13 @@ function statusClasses(status: string): string {
 
 export function DeploymentsPage() {
   const { data: deployments, loading } = useDeployments();
-  const { data: config } = useDeploymentConfig();
   const [selectedDeploymentId, setSelectedDeploymentId] = useState<string | null>(null);
   const [copiedMessage, setCopiedMessage] = useState<string | null>(null);
   const effectiveSelectedDeploymentId = selectedDeploymentId && deployments.some((item) => item.id === selectedDeploymentId)
     ? selectedDeploymentId
     : deployments[0]?.id ?? null;
   const { data: deployment, taskLog } = useDeployment(effectiveSelectedDeploymentId);
+  const { data: provisioningDiagnostics, loading: provisioningLoading } = useDeploymentProvisioning(effectiveSelectedDeploymentId);
 
   return (
     <div className="space-y-6">
@@ -96,14 +97,10 @@ export function DeploymentsPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={async () => {
-                      await navigator.clipboard.writeText(buildInstallCommand(deployment, config));
-                      setCopiedMessage("Share install command copied");
-                      setTimeout(() => setCopiedMessage(null), 2500);
-                    }}
+                    onClick={() => window.open(getDeploymentPackageUrl(deployment.id), "_blank", "noopener,noreferrer")}
                     className="rounded-lg bg-cyan-500 px-3 py-1.5 text-sm font-medium text-slate-950 transition-colors hover:bg-cyan-400"
                   >
-                    Copy share command
+                    Download ZIP
                   </button>
                   <button
                     type="button"
@@ -146,9 +143,11 @@ export function DeploymentsPage() {
                 </div>
                 <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-sm md:col-span-2">
                   <div className="text-slate-400">Local install mode</div>
-                  <div className="mt-1 text-slate-300">Copy the full package folder locally and run install.ps1 with -PackagePath pointing to that local package directory.</div>
+                  <div className="mt-1 text-slate-300">Download package.zip, extract it on the target VM, and run install.ps1 with -PackagePath pointing at the extracted package directory.</div>
                 </div>
               </div>
+
+                <GuacamoleProvisioningSummary diagnostics={provisioningDiagnostics} loading={provisioningLoading} />
 
               <div className="rounded-xl border border-slate-700 bg-slate-950/70 p-4">
                 <div className="mb-2 text-sm font-medium text-slate-200">Task log</div>

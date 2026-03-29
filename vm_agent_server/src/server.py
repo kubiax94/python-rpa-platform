@@ -1,4 +1,5 @@
 import asyncio
+from http.cookies import SimpleCookie
 import logging
 import os
 import time
@@ -15,6 +16,7 @@ from websockets.asyncio.client import connect as websocket_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from vm_agent_server.src.api.routers.guacamole_router import build_guacamole_router
+from vm_agent_server.src.api.schemas.agent_responses import AgentTokenRotationResponse
 from shared.network.events.example_event import AuthResultData, AuthResultEvent, CaptureProcessScreenshotEvent, CreateSessionEvent, CancelTaskEvent, CancelTaskData, HeartbeatData, SetWindowTrackingData, SetWindowTrackingEvent, StartMonitoredProcessEvent, StartProgramEvent
 from vm_agent_server.src.api.routers.deployment_router import build_deployment_router
 from vm_agent_server.src.api.routers.task_router import build_task_router
@@ -129,6 +131,7 @@ async def lifespan(app):
     await telemetry_db.start()
     await task_db.start()
     await registry_db.start()
+    await deployment_service.recover_interrupted_deployments()
     frontend_snapshot_broadcast_task = asyncio.create_task(_frontend_snapshot_broadcaster())
     heartbeat_watchdog_task = asyncio.create_task(_heartbeat_watchdog())
     yield
@@ -164,6 +167,7 @@ process_manager_watchers: dict[str, set[WebSocket]] = {}
 frontend_watched_agents: dict[WebSocket, set[str]] = {}
 guacamole_agent_tokens: dict[str, set[str]] = {}
 guacamole_http_tunnel_tokens: dict[str, str] = {}
+guacamole_http_tunnel_cookies: dict[str, str] = {}
 guacamole_websocket_proxy_supported: bool | None = None
 
 
@@ -246,8 +250,8 @@ async def websocket_endpoint(ws: WebSocket):
                                 data=AuthResultData(
                                     status="ok",
                                     agent_id=client_id,
-                                    secret=issued_secret,
-                                    secret_issued=bool(issued_secret),
+                                    access_token=issued_secret,
+                                    access_token_issued=bool(issued_secret),
                                 )
                             ).model_dump_json()
                         )
@@ -581,6 +585,14 @@ async def api_agent_registry_item(agent_id: str):
     return JSONResponse(item)
 
 
+@app.post("/api/agent-registry/{agent_id}/rotate-token", response_model=AgentTokenRotationResponse)
+async def api_rotate_agent_token(agent_id: str):
+    rotated = await registry_db.rotate_agent_token_version(agent_id)
+    if not rotated:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return {"ok": True, **rotated}
+
+
 def _resolve_agent_ws_url(request: Request) -> str:
     override = os.getenv("VM_AGENT_SERVER_WS_URL")
     if override:
@@ -634,11 +646,33 @@ def _extract_guacamole_tunnel_uuid(raw_query: str) -> str:
     for prefix in ("read:", "write:"):
         if raw_query.startswith(prefix):
             remainder = raw_query[len(prefix):]
-            if prefix == "read:":
-                return remainder.split(":", 1)[0].strip()
-            return remainder.strip()
+            return remainder.split(":", 1)[0].strip()
 
     return ""
+
+
+def _extract_guacamole_cookie_header(headers: any) -> str:
+    raw_cookie_headers: list[str] = []
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        raw_cookie_headers = get_all("Set-Cookie") or []
+
+    if not raw_cookie_headers:
+        single_cookie = headers.get("Set-Cookie")
+        if single_cookie:
+            raw_cookie_headers = [single_cookie]
+
+    if not raw_cookie_headers:
+        return ""
+
+    cookie = SimpleCookie()
+    for raw_cookie in raw_cookie_headers:
+        try:
+            cookie.load(raw_cookie)
+        except Exception:
+            continue
+
+    return "; ".join(f"{morsel.key}={morsel.value}" for morsel in cookie.values())
 
 
 def _proxy_guacamole_tunnel_request(method: str, raw_query: str, body: bytes, headers: dict[str, str]) -> Response:
@@ -658,8 +692,11 @@ def _proxy_guacamole_tunnel_request(method: str, raw_query: str, body: bytes, he
         request_headers["Content-Type"] = content_type
     tunnel_uuid = _extract_guacamole_tunnel_uuid(raw_query)
     tunnel_token = headers.get("guacamole-tunnel-token") or guacamole_http_tunnel_tokens.get(tunnel_uuid, "")
+    tunnel_cookie = headers.get("cookie") or guacamole_http_tunnel_cookies.get(tunnel_uuid, "")
     if tunnel_token:
         request_headers["Guacamole-Tunnel-Token"] = tunnel_token
+    if tunnel_cookie:
+        request_headers["Cookie"] = tunnel_cookie
 
     upstream_request = UrlRequest(
         upstream_url,
@@ -672,8 +709,17 @@ def _proxy_guacamole_tunnel_request(method: str, raw_query: str, body: bytes, he
         upstream_response = urlopen(upstream_request, timeout=60)
     except HTTPError as error:
         error_body = error.read()
+        if raw_query.startswith(("read:", "write:")):
+            logger.warning(
+                "Guacamole HTTP tunnel request failed: method=%s query=%s status=%s token_forwarded=%s",
+                method,
+                raw_query,
+                error.code,
+                bool(tunnel_token),
+            )
         if tunnel_uuid and error.code in {404, 410}:
             guacamole_http_tunnel_tokens.pop(tunnel_uuid, None)
+            guacamole_http_tunnel_cookies.pop(tunnel_uuid, None)
         return Response(
             content=error_body,
             status_code=error.code,
@@ -691,9 +737,12 @@ def _proxy_guacamole_tunnel_request(method: str, raw_query: str, body: bytes, he
     if raw_query == "connect":
         connect_uuid = upstream_response.read().decode("utf-8").strip()
         connect_tunnel_token = response_headers.get("Guacamole-Tunnel-Token", "").strip()
+        connect_cookie_header = _extract_guacamole_cookie_header(upstream_response.headers)
         upstream_response.close()
         if connect_uuid and connect_tunnel_token:
             guacamole_http_tunnel_tokens[connect_uuid] = connect_tunnel_token
+        if connect_uuid and connect_cookie_header:
+            guacamole_http_tunnel_cookies[connect_uuid] = connect_cookie_header
         return Response(
             content=connect_uuid,
             status_code=upstream_response.status,
@@ -730,6 +779,7 @@ def _proxy_guacamole_tunnel_request(method: str, raw_query: str, body: bytes, he
     upstream_response.close()
     if tunnel_uuid and raw_query.startswith("write:") and upstream_response.status >= 400:
         guacamole_http_tunnel_tokens.pop(tunnel_uuid, None)
+        guacamole_http_tunnel_cookies.pop(tunnel_uuid, None)
     return Response(
         content=response_body,
         status_code=upstream_response.status,
@@ -743,6 +793,7 @@ app.include_router(build_deployment_router(deployment_service, registry_db, _res
 app.include_router(
     build_guacamole_router(
         agent_runtime.get_agent_state,
+        registry_db.get_agent,
         _resolve_public_base_url,
         build_guacamole_proxy_tunnel_urls,
         get_guacamole_config,

@@ -103,7 +103,7 @@ class VmAgent(AgentBus):
             self._validate_runtime_host()
             connection_config = {
                 "url": self._runtime_config.get("server_url", "ws://192.168.1.10:8765/ws"),
-                "secret": self._runtime_config.get("secret"),
+                "access_token": self._runtime_config.get("access_token"),
                 "bootstrap_token": self._runtime_config.get("bootstrap_token"),
                 "client_id": self._runtime_config.get("agent_id"),
             }
@@ -195,14 +195,15 @@ class VmAgent(AgentBus):
             self._status = AgentSatus.ERROR
             return
 
-        if not eventData.secret:
+        if not eventData.access_token:
             return
 
-        self._runtime_config["secret"] = eventData.secret
+        self._runtime_config["access_token"] = eventData.access_token
         self._runtime_config.pop("bootstrap_token", None)
+        self._runtime_config.pop("secret", None)
         persist_agent_runtime_config(self._runtime_config)
-        self._client.update_credentials(secret=eventData.secret, bootstrap_token=None)
-        logging.info("Persisted issued agent secret for %s", eventData.agent_id or self._client.client_id)
+        self._client.update_credentials(access_token=eventData.access_token, bootstrap_token=None)
+        logging.info("Persisted issued agent access token for %s", eventData.agent_id or self._client.client_id)
     
     def _start_process(self, eventData: StartProgramData):
         logging.info(f"Starting process with event data: {eventData}")

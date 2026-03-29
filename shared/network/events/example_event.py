@@ -1,5 +1,5 @@
 from typing import List, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from shared.protocol.network_event import NetworkEvent
 from shared.network.events import register_event
@@ -118,8 +118,16 @@ class HeartbeatEvent(NetworkEvent):
 class AuthResultData(BaseModel):
     status: Literal["ok", "error"] = Field(default="ok")
     agent_id: str = Field(default="", description="Resolved agent identifier")
-    secret: str = Field(default="", description="Issued long-lived secret after bootstrap exchange")
-    secret_issued: bool = Field(default=False, description="Whether the server exchanged the bootstrap token for a new secret")
+    access_token: str = Field(
+        default="",
+        description="Issued runtime bearer token after bootstrap exchange",
+        validation_alias=AliasChoices("access_token", "secret"),
+    )
+    access_token_issued: bool = Field(
+        default=False,
+        description="Whether the server exchanged the bootstrap token for a new runtime token",
+        validation_alias=AliasChoices("access_token_issued", "secret_issued"),
+    )
     reason: str = Field(default="", description="Error detail when authentication fails")
 
 

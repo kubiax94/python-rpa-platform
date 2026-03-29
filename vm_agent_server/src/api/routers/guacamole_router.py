@@ -12,6 +12,7 @@ from vm_agent_server.src.api.schemas.deployment_responses import GenericStatusRe
 
 def build_guacamole_router(
     get_agent_state,
+    get_agent_record,
     resolve_public_base_url: Callable[[Request], str],
     build_proxy_tunnel_urls,
     get_guacamole_config,
@@ -27,6 +28,16 @@ def build_guacamole_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
 
+    async def build_agent_context(agent_id: str) -> dict | None:
+        state = get_agent_state(agent_id) or {}
+        agent_record = await get_agent_record(agent_id)
+        if not state and not agent_record:
+            return None
+        if agent_record:
+            state = dict(state)
+            state["__agent_record"] = agent_record
+        return state
+
     @router.get("/guacamole/config", response_model=GuacamoleConfigResponse)
     async def api_guacamole_config():
         return get_guacamole_config()
@@ -37,21 +48,21 @@ def build_guacamole_router(
 
     @router.get("/agents/{agent_id}/guacamole")
     async def api_agent_guacamole(agent_id: str):
-        state = get_agent_state(agent_id)
+        state = await build_agent_context(agent_id)
         if state is None:
             return JSONResponse({"error": "Not found"}, status_code=404)
         return build_guacamole_session(agent_id, state)
 
     @router.get("/agents/{agent_id}/guacamole/diagnostics")
     async def api_agent_guacamole_diagnostics(agent_id: str):
-        state = get_agent_state(agent_id)
+        state = await build_agent_context(agent_id)
         if state is None:
             return JSONResponse({"error": "Not found"}, status_code=404)
         return await asyncio.to_thread(inspect_guacamole_connection, agent_id, state)
 
     @router.post("/agents/{agent_id}/guacamole/session")
     async def api_agent_guacamole_session(agent_id: str, request: Request):
-        state = get_agent_state(agent_id)
+        state = await build_agent_context(agent_id)
         if state is None:
             return JSONResponse({"error": "Not found"}, status_code=404)
 
@@ -97,6 +108,7 @@ def build_guacamole_router(
             "accept": request.headers.get("accept", "*/*"),
             "content-type": request.headers.get("content-type", ""),
             "guacamole-tunnel-token": request.headers.get("guacamole-tunnel-token", ""),
+            "cookie": request.headers.get("cookie", ""),
         }
         return await asyncio.to_thread(proxy_guacamole_tunnel_request, request.method, raw_query, body, proxy_headers)
 

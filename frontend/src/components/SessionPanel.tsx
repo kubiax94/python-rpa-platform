@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useState } from "react";
 import type { ProcessScreenshotState } from "@/hooks/useAgentSocket";
 import { getAgentSessions, getSessionProcessCount, type AgentState, type ProcessReplica, type ProcessWindowReplica, type SessionReplica } from "@/types/agent";
 import { ProcessTable } from "./ProcessTable";
@@ -85,6 +85,10 @@ function getSessionLabel(sessionKey: string, sessionData: SessionReplica) {
   return sessionKey;
 }
 
+function getCurrentTimestamp() {
+  return Date.now();
+}
+
 export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotEvent, onCaptureProcessScreenshot, onCaptureDesktopScreenshot, onWatchProcessManager, onUnwatchProcessManager }: SessionPanelProps) {
   const sessions = getAgentSessions(state);
   const [viewMode, setViewMode] = useState<"table" | "tree">("table");
@@ -114,7 +118,7 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
       )?.[0]
     : undefined;
 
-  const resolveProcessContext = (pid: number) => {
+  const resolveProcessContext = useCallback((pid: number) => {
     for (const [sessionKey, sessionData] of sessions) {
       for (const proc of Object.values(sessionData.processes || {})) {
         if (proc.pid === pid) {
@@ -129,9 +133,9 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
     }
 
     return null;
-  };
+  }, [sessions]);
 
-  const resolveSessionContext = (sessionId?: number) => {
+  const resolveSessionContext = useCallback((sessionId?: number) => {
     for (const [sessionKey, sessionData] of sessions) {
       if (sessionData.session_id === sessionId) {
         return {
@@ -145,9 +149,11 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
       sessionLabel: sessionId != null ? `Session ${sessionId}` : "Unknown session",
       username: undefined,
     };
-  };
+  }, [sessions]);
 
-  const buildHistoryEntry = (payload: ProcessScreenshotState): ScreenshotHistoryEntry => {
+  const buildHistoryEntry = useCallback((payload: ProcessScreenshotState): ScreenshotHistoryEntry => {
+    const startedAt = getCurrentTimestamp();
+
     if (payload.targetType === "desktop") {
       const sessionContext = resolveSessionContext(payload.sessionId);
       return {
@@ -157,7 +163,7 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
         subtitle: sessionContext.username ? `User: ${sessionContext.username}` : "Full session desktop",
         sessionLabel: sessionContext.sessionLabel,
         username: sessionContext.username,
-        startedAt: Date.now(),
+        startedAt,
       };
     }
 
@@ -178,29 +184,33 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
       sessionId: payload.sessionId ?? processContext?.sessionId,
       username: processContext?.username,
       windowTitle: payload.windowTitle ?? matchedWindow?.window_title,
-      startedAt: Date.now(),
+      startedAt,
     };
-  };
+  }, [resolveProcessContext, resolveSessionContext]);
+
+  const applyLatestScreenshotEvent = useEffectEvent((event: ProcessScreenshotState) => {
+    setHistory((current) => {
+      const existingIndex = current.findIndex((entry) => entry.requestId === event.requestId);
+      if (existingIndex >= 0) {
+        const next = [...current];
+        next[existingIndex] = {
+          ...next[existingIndex],
+          ...event,
+        };
+        return next;
+      }
+
+      return [...current, buildHistoryEntry(event)];
+    });
+    setSelectedEntryId(event.requestId);
+  });
 
   useEffect(() => {
     if (!latestScreenshotEvent || latestScreenshotEvent.agentId !== agentId) {
       return;
     }
 
-    setHistory((current) => {
-      const existingIndex = current.findIndex((entry) => entry.requestId === latestScreenshotEvent.requestId);
-      if (existingIndex >= 0) {
-        const next = [...current];
-        next[existingIndex] = {
-          ...next[existingIndex],
-          ...latestScreenshotEvent,
-        };
-        return next;
-      }
-
-      return [...current, buildHistoryEntry(latestScreenshotEvent)];
-    });
-    setSelectedEntryId(latestScreenshotEvent.requestId);
+    applyLatestScreenshotEvent(latestScreenshotEvent);
   }, [agentId, latestScreenshotEvent]);
 
   const selectedEntry = useMemo(() => {
@@ -263,6 +273,7 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
   };
 
   const handleCaptureProcess = (proc: ProcessReplica, windowEntry?: ProcessWindowReplica) => {
+    const startedAt = getCurrentTimestamp();
     const request = onCaptureProcessScreenshot(agentId, proc.pid, windowEntry?.hwnd);
     const context = resolveProcessContext(proc.pid);
     const selectedWindowTitle = windowEntry?.window_title || proc.window_title;
@@ -285,7 +296,7 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
       subtitle: `${windowEntry ? "Window" : "PID"} ${windowEntry?.hwnd ?? proc.pid} • ${context?.sessionLabel || "Unknown session"}`,
       sessionLabel: context?.sessionLabel,
       username: context?.username,
-      startedAt: Date.now(),
+      startedAt,
     });
   };
 
@@ -294,6 +305,7 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
       return;
     }
 
+    const startedAt = getCurrentTimestamp();
     const request = onCaptureDesktopScreenshot(agentId, sessionData.session_id);
     appendPendingEntry({
       agentId,
@@ -311,13 +323,14 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
       subtitle: sessionData.username ? `User: ${sessionData.username}` : "Full session desktop",
       sessionLabel: getSessionLabel(sessionKey, sessionData),
       username: sessionData.username,
-      startedAt: Date.now(),
+      startedAt,
     });
   };
 
   const handleRefreshSelected = (entry: ScreenshotHistoryEntry) => {
     if (entry.targetType === "desktop") {
       if (entry.sessionId != null) {
+        const startedAt = getCurrentTimestamp();
         const request = onCaptureDesktopScreenshot(agentId, entry.sessionId);
         appendPendingEntry({
           ...entry,
@@ -327,13 +340,14 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
           imageBase64: undefined,
           error: undefined,
           capturedAt: undefined,
-          startedAt: Date.now(),
+          startedAt,
         });
       }
       return;
     }
 
     if (entry.pid != null) {
+      const startedAt = getCurrentTimestamp();
       const context = resolveProcessContext(entry.pid);
       const request = onCaptureProcessScreenshot(agentId, entry.pid, entry.hwnd);
       appendPendingEntry({
@@ -348,7 +362,7 @@ export function SessionPanel({ agentId, state, focusedProcess, latestScreenshotE
         imageBase64: undefined,
         error: undefined,
         capturedAt: undefined,
-        startedAt: Date.now(),
+        startedAt,
       });
     }
   };

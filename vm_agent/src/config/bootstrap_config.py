@@ -36,10 +36,17 @@ def load_agent_runtime_config() -> dict[str, Any]:
     if not isinstance(payload, dict):
         payload = {}
 
+    # Normalize legacy key name to the newer access_token naming.
+    if payload.get("secret") and not payload.get("access_token"):
+        payload["access_token"] = payload.get("secret")
+    payload.pop("secret", None)
+
     if os.getenv("VM_AGENT_SERVER_URL"):
         payload["server_url"] = os.getenv("VM_AGENT_SERVER_URL")
-    if os.getenv("VM_AGENT_SECRET"):
-        payload["secret"] = os.getenv("VM_AGENT_SECRET")
+    if os.getenv("VM_AGENT_ACCESS_TOKEN"):
+        payload["access_token"] = os.getenv("VM_AGENT_ACCESS_TOKEN")
+    elif os.getenv("VM_AGENT_SECRET"):
+        payload["access_token"] = os.getenv("VM_AGENT_SECRET")
     if os.getenv("VM_AGENT_BOOTSTRAP_TOKEN"):
         payload["bootstrap_token"] = os.getenv("VM_AGENT_BOOTSTRAP_TOKEN")
     if os.getenv("VM_AGENT_ID"):
@@ -51,4 +58,8 @@ def load_agent_runtime_config() -> dict[str, Any]:
 def persist_agent_runtime_config(payload: dict[str, Any]):
     target_path = get_agent_runtime_config_path()
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    normalized_payload = dict(payload)
+    if normalized_payload.get("secret") and not normalized_payload.get("access_token"):
+        normalized_payload["access_token"] = normalized_payload.get("secret")
+    normalized_payload.pop("secret", None)
+    target_path.write_text(json.dumps(normalized_payload, indent=2), encoding="utf-8")

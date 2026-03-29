@@ -19,6 +19,7 @@ class DeploymentResponse(ApiResponseModel):
     commit_sha: str = ""
     artifact_dir: str = ""
     artifact_exe_path: str = ""
+    package_zip_path: str = ""
     bootstrap_path: str = ""
     install_script_path: str = ""
     installer_copy_path: str = ""
@@ -35,6 +36,17 @@ class DeploymentConfigResponse(ApiResponseModel):
     artifact_share_root: str = ""
     latest_installer_share_template: str = ""
     active_deployment: DeploymentResponse | None = None
+
+
+class GuacamoleProvisioningDiagnosticsResponse(ApiResponseModel):
+    available: bool
+    deployment_id: str
+    agent_id: str = ""
+    hostname: str = ""
+    data_source: str = ""
+    detail: str | None = None
+    group: dict[str, Any] = Field(default_factory=dict)
+    connection: dict[str, Any] = Field(default_factory=dict)
 
 
 class GenericStatusResponse(ApiResponseModel):

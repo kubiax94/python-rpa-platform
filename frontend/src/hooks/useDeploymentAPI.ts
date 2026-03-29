@@ -17,6 +17,7 @@ export interface AgentDeployment {
   commit_sha: string;
   artifact_dir: string;
   artifact_exe_path: string;
+  package_zip_path: string;
   bootstrap_path: string;
   install_script_path: string;
   installer_copy_path: string;
@@ -25,6 +26,23 @@ export interface AgentDeployment {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+}
+
+export interface DeploymentProvisioningEntity {
+  action: string;
+  identifier: string;
+  name: string;
+}
+
+export interface DeploymentProvisioningDiagnostics {
+  available: boolean;
+  deployment_id: string;
+  agent_id: string;
+  hostname: string;
+  data_source: string;
+  detail: string | null;
+  group: DeploymentProvisioningEntity;
+  connection: DeploymentProvisioningEntity;
 }
 
 export interface DeploymentConfig {
@@ -58,6 +76,13 @@ export async function prepareDeployment(body: {
   agent_id?: string;
   hostname: string;
   display_name?: string;
+  guacamole_target_host?: string;
+  guacamole_username?: string;
+  guacamole_domain?: string;
+  guacamole_password?: string;
+  guacamole_secret?: string;
+  guacamole_group_name?: string;
+  guacamole_connection_name?: string;
   repo_url?: string;
   source_ref?: string;
   requested_by?: string;
@@ -69,26 +94,12 @@ export function getDeploymentInstallerUrl(deploymentId: string): string {
   return `${API_BASE}/api/deployments/${encodeURIComponent(deploymentId)}/installer`;
 }
 
-export function buildInstallCommand(deployment: AgentDeployment, config: DeploymentConfig | null): string {
-  const installerTemplate = config?.latest_installer_share_template || "";
-  const installerPath = installerTemplate
-    ? installerTemplate.replace("{deployment_id}", deployment.id)
-    : deployment.installer_copy_path || deployment.install_script_path;
-  const commandParts = [
-    "powershell",
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    `\"${installerPath}\"`,
-    "-ArtifactId",
-    `\"${deployment.id}\"`,
-  ];
-  return commandParts.join(" ");
+export function getDeploymentPackageUrl(deploymentId: string): string {
+  return `${API_BASE}/api/deployments/${encodeURIComponent(deploymentId)}/package`;
 }
 
 export function buildLocalInstallCommand(deployment: AgentDeployment): string {
-  const localPackagePath = "C:\\path\\to\\package";
+  const localPackagePath = "C:\\path\\to\\extracted-package";
   const localInstallerPath = `${localPackagePath}\\install.ps1`;
   const commandParts = [
     "powershell",
@@ -193,4 +204,42 @@ export function useDeployment(deploymentId: string | null) {
   }, [deploymentId, refresh]);
 
   return { data, loading, refresh, taskLog };
+}
+
+export function useDeploymentProvisioning(deploymentId: string | null) {
+  const [data, setData] = useState<DeploymentProvisioningDiagnostics | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!deploymentId) {
+      setData(null);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const diagnostics = await fetchJSON<DeploymentProvisioningDiagnostics>(
+        `${API_BASE}/api/deployments/${encodeURIComponent(deploymentId)}/guacamole/provisioning`,
+      );
+      setData(diagnostics);
+    } catch (error) {
+      console.error("[useDeploymentProvisioning] Error:", error);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [deploymentId]);
+
+  useEffect(() => {
+    if (!deploymentId) {
+      setData(null);
+      return;
+    }
+
+    refresh();
+    const interval = setInterval(refresh, 3000);
+    return () => clearInterval(interval);
+  }, [deploymentId, refresh]);
+
+  return { data, loading, refresh };
 }

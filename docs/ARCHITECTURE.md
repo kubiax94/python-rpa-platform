@@ -120,6 +120,21 @@ Responsibilities:
 
 This is the contract boundary for cross-process communication. Changes here should be made carefully and kept backward compatible where possible.
 
+### Shared Security
+
+Location: `shared/security/`
+
+Responsibilities:
+
+- defines the shared JWT claims model for agent runtime auth,
+- provides signing and verification helpers used by both sides of the agent-server boundary,
+- keeps the runtime bearer token format centralized instead of duplicating token parsing logic.
+
+Important note:
+
+- `shared/` defines token format and verification primitives,
+- the server still owns issuance policy, token rotation, and revocation state.
+
 ### Apache Guacamole
 
 Responsibilities:
@@ -449,6 +464,53 @@ Important runtime behavior:
 - heartbeat timeouts are enforced by a background watchdog,
 - task output/status updates use live event forwarding in addition to DB persistence,
 - frontend control events are forwarded through FastAPI to the connected agent, not sent directly from browser to agent.
+
+### 6. Agent Auth Flow
+
+The auth flow is intentionally split into two phases:
+
+- bootstrap auth via a one-time bootstrap token stored in the registry DB,
+- steady-state auth via JWT issued by the server after bootstrap.
+
+```mermaid
+sequenceDiagram
+    participant O as Operator / Deployment Flow
+    participant S as FastAPI Server
+    participant DB as AgentRegistryDB
+    participant A as Agent
+    participant J as shared/security/agent_jwt
+
+    O->>S: Prepare deployment
+    S->>DB: set_bootstrap_token(agent_id, hash, expires_at)
+    S-->>A: agent.bootstrap.json with bootstrap token
+
+    A->>S: WS connect with Authorization: Bearer bootstrap_token
+    S->>DB: authorize_agent(agent_id, bootstrap_token)
+    DB->>J: issue JWT with claims(agent_id, ver=token_version+1)
+    DB->>DB: persist token_version and rotation timestamp
+    S-->>A: auth_result(access_token=jwt, access_token_issued=true)
+    A->>A: persist runtime bearer token locally
+
+    A->>S: next WS connect with Authorization: Bearer jwt
+    S->>DB: authorize_agent(agent_id, jwt)
+    DB->>J: verify signature, issuer, purpose, agent_id, version
+    S-->>A: auth_result(access_token_issued=false)
+```
+
+Important properties:
+
+- the bootstrap token remains stateful and one-time,
+- runtime JWT validation is signature-based and version-gated,
+- JWT rotation no longer depends on storing the exact current token hash in the DB,
+- revocation is achieved by incrementing `token_version` in the registry DB,
+- old JWTs become invalid as soon as their embedded `ver` claim no longer matches DB state.
+
+Explicit admin rotation flow:
+
+- `POST /api/agent-registry/{agent_id}/rotate-token`
+- this increments `token_version` for the target agent,
+- existing runtime JWTs for that agent stop validating immediately,
+- bootstrap token state is left unchanged.
 
 ## Data Ownership
 

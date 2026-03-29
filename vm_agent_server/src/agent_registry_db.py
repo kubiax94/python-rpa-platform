@@ -10,6 +10,9 @@ from typing import Any, Optional
 
 import aiosqlite
 
+from shared.security.agent_jwt import AgentJwtError, looks_like_jwt
+from vm_agent_server.src.agent_auth import issue_agent_access_token, verify_agent_access_token
+
 logger = logging.getLogger(__name__)
 BOOTSTRAP_RECOVERY_WINDOW_SECONDS = int(os.getenv("VM_AGENT_BOOTSTRAP_RECOVERY_WINDOW_SECONDS", str(24 * 60 * 60)))
 
@@ -40,6 +43,7 @@ CREATE TABLE IF NOT EXISTS agent_credentials (
     bootstrap_used_at       INTEGER,
     secret_hash             TEXT,
     secret_rotated_at       INTEGER,
+    token_version           INTEGER NOT NULL DEFAULT 0,
     updated_at              INTEGER NOT NULL
 );
 
@@ -55,9 +59,11 @@ CREATE TABLE IF NOT EXISTS agent_deployments (
     commit_sha          TEXT NOT NULL DEFAULT '',
     artifact_dir        TEXT NOT NULL DEFAULT '',
     artifact_exe_path   TEXT NOT NULL DEFAULT '',
+    package_zip_path    TEXT NOT NULL DEFAULT '',
     bootstrap_path      TEXT NOT NULL DEFAULT '',
     install_script_path TEXT NOT NULL DEFAULT '',
     installer_copy_path TEXT NOT NULL DEFAULT '',
+    metadata_json       TEXT NOT NULL DEFAULT '{}',
     error               TEXT,
     build_log           TEXT NOT NULL DEFAULT '',
     created_at          INTEGER NOT NULL,
@@ -84,6 +90,16 @@ def _deserialize_metadata(value: str | None) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
+def _merge_metadata(existing: dict[str, Any] | None, incoming: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(existing or {})
+    for key, value in (incoming or {}).items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _merge_metadata(merged.get(key), value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def hash_token(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -102,6 +118,9 @@ class AgentRegistryDB:
         await self._ensure_column("agent_deployments", "repo_url", "TEXT NOT NULL DEFAULT ''")
         await self._ensure_column("agent_deployments", "task_id", "TEXT")
         await self._ensure_column("agent_deployments", "installer_copy_path", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column("agent_deployments", "package_zip_path", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column("agent_deployments", "metadata_json", "TEXT NOT NULL DEFAULT '{}' ")
+        await self._ensure_column("agent_credentials", "token_version", "INTEGER NOT NULL DEFAULT 0")
         await self._db.commit()
         logger.info("AgentRegistryDB started: %s", self._db_path)
 
@@ -145,7 +164,7 @@ class AgentRegistryDB:
         merged_version = current_version or (existing.get("current_version", "") if existing else "")
         merged_last_deployment = last_deployment_id or (existing.get("last_deployment_id") if existing else None)
         merged_last_seen = last_seen_at if last_seen_at is not None else (existing.get("last_seen_at") if existing else None)
-        merged_metadata = metadata or (existing.get("metadata") if existing else {})
+        merged_metadata = _merge_metadata(existing.get("metadata") if existing else {}, metadata)
 
         await self._db.execute(
             """
@@ -207,6 +226,33 @@ class AgentRegistryDB:
             columns = [d[0] for d in cursor.description]
             return dict(zip(columns, row))
 
+    async def rotate_agent_token_version(self, agent_id: str) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+
+        agent = await self.get_agent(agent_id)
+        if not agent:
+            return None
+
+        credentials = await self.get_agent_credentials(agent_id) or {}
+        next_version = max(int(credentials.get("token_version") or 0), 0) + 1
+        now = int(time.time())
+
+        await self._db.execute(
+            """
+            INSERT INTO agent_credentials (agent_id, token_version, secret_rotated_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(agent_id) DO UPDATE SET
+                secret_hash = NULL,
+                token_version = excluded.token_version,
+                secret_rotated_at = excluded.secret_rotated_at,
+                updated_at = excluded.updated_at
+            """,
+            (agent_id, next_version, now, now),
+        )
+        await self._db.commit()
+        return {"agent_id": agent_id, "token_version": next_version, "rotated_at": now}
+
     async def authorize_agent(self, agent_id: str, token: str | None) -> dict[str, Any]:
         credentials = await self.get_agent_credentials(agent_id)
         if not credentials:
@@ -217,14 +263,36 @@ class AgentRegistryDB:
         bootstrap_used_at = credentials.get("bootstrap_used_at")
         secret_hash = credentials.get("secret_hash")
         secret_rotated_at = credentials.get("secret_rotated_at")
+        token_version = int(credentials.get("token_version") or 0)
 
         if not token:
-            if bootstrap_token_hash or secret_hash:
+            if bootstrap_token_hash or secret_hash or token_version > 0:
                 return {"authorized": False, "reason": "missing bearer token"}
             return {"authorized": True, "mode": "legacy", "issued_secret": None}
 
         token_hash = hash_token(token)
         now = int(time.time())
+
+        if looks_like_jwt(token):
+            if token_version <= 0:
+                return {"authorized": False, "reason": "invalid bearer token"}
+            try:
+                verify_agent_access_token(token, agent_id, expected_version=token_version)
+            except AgentJwtError:
+                return {"authorized": False, "reason": "invalid bearer token"}
+
+            if not bootstrap_used_at and self._db:
+                await self._db.execute(
+                    """
+                    UPDATE agent_credentials
+                    SET bootstrap_used_at = ?,
+                        updated_at = ?
+                    WHERE agent_id = ?
+                    """,
+                    (now, now, agent_id),
+                )
+                await self._db.commit()
+            return {"authorized": True, "mode": "jwt", "issued_secret": None}
 
         if secret_hash and token_hash == secret_hash:
             if not bootstrap_used_at and self._db:
@@ -246,17 +314,19 @@ class AgentRegistryDB:
             and not bootstrap_used_at
             and (bootstrap_expires_at is None or bootstrap_expires_at >= now)
         ):
-            issued_secret = uuid.uuid4().hex + uuid.uuid4().hex
+            next_token_version = max(token_version, 0) + 1
+            issued_secret = issue_agent_access_token(agent_id, token_version=next_token_version)
             if self._db:
                 await self._db.execute(
                     """
                     UPDATE agent_credentials
-                    SET secret_hash = ?,
+                    SET secret_hash = NULL,
                         secret_rotated_at = ?,
+                        token_version = ?,
                         updated_at = ?
                     WHERE agent_id = ?
                     """,
-                    (hash_token(issued_secret), now, now, agent_id),
+                    (now, next_token_version, now, agent_id),
                 )
                 await self._db.commit()
             return {"authorized": True, "mode": "bootstrap", "issued_secret": issued_secret}
@@ -265,11 +335,12 @@ class AgentRegistryDB:
             bootstrap_token_hash
             and token_hash == bootstrap_token_hash
             and bootstrap_used_at
-            and secret_hash
+            and token_version > 0
             and secret_rotated_at
             and now - secret_rotated_at <= BOOTSTRAP_RECOVERY_WINDOW_SECONDS
         ):
-            issued_secret = uuid.uuid4().hex + uuid.uuid4().hex
+            next_token_version = token_version + 1
+            issued_secret = issue_agent_access_token(agent_id, token_version=next_token_version)
             logger.warning(
                 "Recovering bootstrap credentials for agent %s within %ss window",
                 agent_id,
@@ -279,12 +350,13 @@ class AgentRegistryDB:
                 await self._db.execute(
                     """
                     UPDATE agent_credentials
-                    SET secret_hash = ?,
+                    SET secret_hash = NULL,
                         secret_rotated_at = ?,
+                        token_version = ?,
                         updated_at = ?
                     WHERE agent_id = ?
                     """,
-                    (hash_token(issued_secret), now, now, agent_id),
+                    (now, next_token_version, now, agent_id),
                 )
                 await self._db.commit()
             return {"authorized": True, "mode": "bootstrap-recovery", "issued_secret": issued_secret}
@@ -306,6 +378,7 @@ class AgentRegistryDB:
         source_ref: str,
         requested_by: str,
         task_id: str,
+        metadata: dict[str, Any] | None = None,
     ):
         if not self._db:
             return
@@ -313,10 +386,10 @@ class AgentRegistryDB:
         now = int(time.time())
         await self._db.execute(
             """
-            INSERT INTO agent_deployments (id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+            INSERT INTO agent_deployments (id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, status, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
             """,
-            (deployment_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, now),
+            (deployment_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, _serialize_metadata(metadata), now),
         )
         await self._db.commit()
         await self.upsert_agent(agent_id, hostname=hostname, last_deployment_id=deployment_id)
@@ -330,6 +403,7 @@ class AgentRegistryDB:
         commit_sha: str | None = None,
         artifact_dir: str | None = None,
         artifact_exe_path: str | None = None,
+        package_zip_path: str | None = None,
         bootstrap_path: str | None = None,
         install_script_path: str | None = None,
         installer_copy_path: str | None = None,
@@ -337,6 +411,7 @@ class AgentRegistryDB:
         build_log: str | None = None,
         started_at: int | None = None,
         completed_at: int | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         if not self._db:
             return
@@ -349,6 +424,7 @@ class AgentRegistryDB:
             ("commit_sha", commit_sha),
             ("artifact_dir", artifact_dir),
             ("artifact_exe_path", artifact_exe_path),
+            ("package_zip_path", package_zip_path),
             ("bootstrap_path", bootstrap_path),
             ("install_script_path", install_script_path),
             ("installer_copy_path", installer_copy_path),
@@ -360,6 +436,12 @@ class AgentRegistryDB:
             if value is not None:
                 fields.append(f"{name} = ?")
                 params.append(value)
+
+        if metadata is not None:
+            existing = await self.get_deployment(deployment_id)
+            merged_metadata = _merge_metadata(existing.get("metadata") if existing else {}, metadata)
+            fields.append("metadata_json = ?")
+            params.append(_serialize_metadata(merged_metadata))
 
         if not fields:
             return
@@ -400,7 +482,9 @@ class AgentRegistryDB:
             if not row:
                 return None
             columns = [d[0] for d in cursor.description]
-            return dict(zip(columns, row))
+            result = dict(zip(columns, row))
+            result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+            return result
 
     async def get_deployments(self, agent_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         if not self._db:
@@ -417,7 +501,9 @@ class AgentRegistryDB:
         async with self._db.execute(query, params) as cursor:
             columns = [d[0] for d in cursor.description]
             async for row in cursor:
-                rows.append(dict(zip(columns, row)))
+                result = dict(zip(columns, row))
+                result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+                rows.append(result)
         return rows
 
     async def get_active_deployment(self) -> Optional[dict[str, Any]]:
@@ -430,7 +516,24 @@ class AgentRegistryDB:
             if not row:
                 return None
             columns = [d[0] for d in cursor.description]
-            return dict(zip(columns, row))
+            result = dict(zip(columns, row))
+            result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+            return result
+
+    async def get_active_deployments(self) -> list[dict[str, Any]]:
+        if not self._db:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        async with self._db.execute(
+            "SELECT * FROM agent_deployments WHERE status IN ('queued', 'building') ORDER BY created_at ASC"
+        ) as cursor:
+            columns = [d[0] for d in cursor.description]
+            async for row in cursor:
+                result = dict(zip(columns, row))
+                result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+                rows.append(result)
+        return rows
 
     async def get_latest_deployment_for_agent(self, agent_id: str) -> Optional[dict[str, Any]]:
         if not self._db:
@@ -443,7 +546,9 @@ class AgentRegistryDB:
             if not row:
                 return None
             columns = [d[0] for d in cursor.description]
-            return dict(zip(columns, row))
+            result = dict(zip(columns, row))
+            result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+            return result
 
     async def get_expected_hostname_for_agent(self, agent_id: str) -> str:
         agent = await self.get_agent(agent_id)

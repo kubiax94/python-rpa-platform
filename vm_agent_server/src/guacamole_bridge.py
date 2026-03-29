@@ -9,6 +9,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from vm_agent_server.src.guacamole_mapping import build_agent_guacamole_mapping
+
 
 def _parse_bool(value: str | None, default: bool) -> bool:
     if value is None:
@@ -61,6 +63,21 @@ def _load_connection_map() -> dict[str, str]:
         clean_value = _clean_string(value)
         if clean_key and clean_value:
             result[clean_key] = clean_value
+    return result
+
+
+def _unique_strings(*values: Any) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean_value = _clean_string(value)
+        if not clean_value:
+            continue
+        lowered = clean_value.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(clean_value)
     return result
 
 
@@ -135,6 +152,19 @@ def _get_auth_config() -> dict[str, str]:
     }
 
 
+def _get_provisioning_config() -> dict[str, Any]:
+    return {
+        "enabled": _parse_bool(os.getenv("GUACAMOLE_AUTO_PROVISION"), True),
+        "group_parent_identifier": _clean_string(os.getenv("GUACAMOLE_AGENT_GROUP_PARENT_IDENTIFIER")) or "ROOT",
+        "protocol": _clean_string(os.getenv("GUACAMOLE_CONNECTION_PROTOCOL")) or "rdp",
+        "rdp_port": _clean_string(os.getenv("GUACAMOLE_RDP_PORT")) or "3389",
+        "parameter_template_json": _clean_string(os.getenv("GUACAMOLE_CONNECTION_PARAMETER_TEMPLATE_JSON")),
+        "attribute_template_json": _clean_string(os.getenv("GUACAMOLE_CONNECTION_ATTRIBUTE_TEMPLATE_JSON")),
+        "default_password": _clean_string(os.getenv("GUACAMOLE_CONNECTION_PASSWORD")),
+        "default_secret": _clean_string(os.getenv("GUACAMOLE_CONNECTION_SECRET")),
+    }
+
+
 def _get_display_config() -> dict[str, Any]:
     width = _parse_int(os.getenv("GUACAMOLE_DISPLAY_WIDTH"))
     height = _parse_int(os.getenv("GUACAMOLE_DISPLAY_HEIGHT"))
@@ -174,6 +204,10 @@ def get_guacamole_config() -> dict[str, Any]:
     if enabled and not connection_map and not default_connection_mode:
         notes.append("Configure GUACAMOLE_CONNECTION_MAP_JSON or GUACAMOLE_DEFAULT_CONNECTION_MODE to resolve agent mappings.")
     if enabled:
+        notes.append("Deployment-created agents carry a Guacamole mapping profile in agent metadata. By default the group name follows agent_id and the connection name follows hostname.")
+    if enabled:
+        notes.append("GUACAMOLE_CONNECTION_PARAMETER_TEMPLATE_JSON can reference {username}, {password}, and {secret}. Password and secret values can be injected at deployment prep time without persisting them into agent metadata.")
+    if enabled:
         notes.append("The React app uses guacamole-common-js and connects directly to the Guacamole tunnel using short-lived session data from FastAPI.")
     if base_url and request_base_url and request_base_url != base_url:
         notes.append("FastAPI uses a server-side Guacamole URL optimized for local loopback requests.")
@@ -201,15 +235,154 @@ def get_guacamole_config() -> dict[str, Any]:
     }
 
 
-def _resolve_connection_id(agent_id: str, metrics: dict[str, Any]) -> tuple[str, str]:
+def _extract_agent_record(agent_state: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(agent_state, dict):
+        return {}
+    record = agent_state.get("__agent_record")
+    return record if isinstance(record, dict) else {}
+
+
+def _extract_agent_metadata(agent_state: dict[str, Any] | None) -> dict[str, Any]:
+    metadata = _extract_agent_record(agent_state).get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _extract_preferred_session_username(agent_state: dict[str, Any] | None) -> str:
+    if not isinstance(agent_state, dict):
+        return ""
+
+    best_username = ""
+    best_score = (-1, -1, -1)
+    for session_key, session_data in agent_state.items():
+        if session_key.startswith("__") or not isinstance(session_data, dict):
+            continue
+
+        username = _clean_string(session_data.get("username"))
+        if not username or username.casefold() in {"unknown", "system", "nt authority\\system"}:
+            continue
+
+        status = _clean_string(session_data.get("status")).casefold()
+        session_type = _clean_string(session_data.get("type")).casefold()
+        try:
+            session_id = int(session_data.get("session_id") or 0)
+        except (TypeError, ValueError):
+            session_id = 0
+
+        score = (
+            2 if status == "active" else 1 if status in {"connected", "up"} else 0,
+            1 if session_type in {"interactive", "user_session"} else 0,
+            1 if session_id > 0 else 0,
+        )
+        if score > best_score:
+            best_score = score
+            best_username = username
+
+    return best_username
+
+
+def _extract_guacamole_mapping(agent_id: str, agent_state: dict[str, Any] | None, metrics: dict[str, Any]) -> dict[str, Any]:
+    agent_record = _extract_agent_record(agent_state)
+    agent_metadata = _extract_agent_metadata(agent_state)
+    stored_mapping = agent_metadata.get("guacamole") if isinstance(agent_metadata.get("guacamole"), dict) else {}
+
+    hostname = _clean_string(metrics.get("hostname")) or _clean_string(agent_record.get("hostname")) or agent_id
+    display_name = _clean_string(agent_record.get("display_name")) or hostname or agent_id
+    target_host = _clean_string(stored_mapping.get("target_host")) or hostname
+    preferred_session_username = _extract_preferred_session_username(agent_state)
+    stored_group_name = _clean_string(stored_mapping.get("group_name"))
+    default_group_markers = {
+        "",
+        _clean_string(agent_id).casefold(),
+        hostname.casefold(),
+        display_name.casefold(),
+    }
+    effective_group_name = stored_group_name
+    if preferred_session_username and stored_group_name.casefold() in default_group_markers:
+        effective_group_name = preferred_session_username
+
+    mapping = build_agent_guacamole_mapping(
+        agent_id=agent_id,
+        hostname=hostname,
+        display_name=display_name,
+        target_host=target_host,
+        username=_clean_string(stored_mapping.get("username")) or preferred_session_username,
+        group_name=effective_group_name,
+        domain=_clean_string(stored_mapping.get("domain")),
+        connection_identifier=_clean_string(stored_mapping.get("connection_identifier")),
+    )
+
+    group_identifier = _clean_string(stored_mapping.get("group_identifier"))
+    if group_identifier:
+        mapping["group_identifier"] = group_identifier
+
+    mapping["group_candidates"] = _unique_strings(
+        *list(stored_mapping.get("group_candidates") or []),
+        *list(mapping.get("group_candidates") or []),
+    )
+    mapping["connection_candidates"] = _unique_strings(
+        *list(stored_mapping.get("connection_candidates") or []),
+        *list(mapping.get("connection_candidates") or []),
+    )
+    mapping["source"] = "metadata" if stored_mapping else "derived"
+    return mapping
+
+
+def _reconcile_provisioned_target(agent_id: str, target: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+    provisioning = _get_provisioning_config()
+    auth = _get_auth_config()
+    mapping = target.get("guacamole_mapping") if isinstance(target.get("guacamole_mapping"), dict) else {}
+    resolved_fields = target.get("resolved_fields") if isinstance(target.get("resolved_fields"), dict) else {}
+    hostname = _clean_string(resolved_fields.get("hostname"))
+
+    if not provisioning["enabled"] or not target.get("enabled") or not mapping or not hostname:
+        return target
+    if not auth["username"] or not auth["password"]:
+        return target
+
+    try:
+        refreshed_mapping, diagnostics = provision_guacamole_agent_target_with_diagnostics(
+            agent_id,
+            hostname,
+            mapping,
+        )
+    except Exception as error:
+        warnings.append(f"Guacamole provisioning reconciliation failed: {error}.")
+        return target
+
+    next_target = dict(target)
+    next_target["guacamole_mapping"] = refreshed_mapping
+    next_target["connection_id"] = _clean_string(refreshed_mapping.get("connection_identifier")) or _clean_string(next_target.get("connection_id"))
+    next_target["connection_label"] = _clean_string(refreshed_mapping.get("connection_name")) or _clean_string(next_target.get("connection_label"))
+    next_target["resolved_fields"] = {
+        **resolved_fields,
+        "guacamole_target_host": _clean_string(refreshed_mapping.get("target_host")) or _clean_string(resolved_fields.get("hostname")),
+        "guacamole_group": _clean_string(refreshed_mapping.get("group_name")),
+        "guacamole_connection_name": _clean_string(refreshed_mapping.get("connection_name")),
+        "guacamole_username": _clean_string(refreshed_mapping.get("username")),
+        "guacamole_domain": _clean_string(refreshed_mapping.get("domain")),
+    }
+    next_target["provisioning_diagnostics"] = diagnostics
+    return next_target
+
+
+def _resolve_connection_id(agent_id: str, metrics: dict[str, Any], guacamole_mapping: dict[str, Any]) -> tuple[str, str]:
     connection_map = _load_connection_map()
     hostname = _clean_string(metrics.get("hostname"))
     azure_vm_name = _clean_string(metrics.get("azure_vm_name"))
     public_ip = _clean_string(metrics.get("azure_public_ip"))
     private_ip = _clean_string(metrics.get("azure_private_ip"))
+    target_host = _clean_string(guacamole_mapping.get("target_host"))
+    mapping_connection_identifier = _clean_string(guacamole_mapping.get("connection_identifier"))
+    mapping_connection_name = _clean_string(guacamole_mapping.get("connection_name"))
+
+    if mapping_connection_identifier:
+        return mapping_connection_identifier, "metadata:connection_identifier"
+    if mapping_connection_name:
+        return mapping_connection_name, "metadata:connection_name"
 
     for candidate, source in (
         (agent_id, "mapping:agent_id"),
+        (target_host, "mapping:target_host"),
         (hostname, "mapping:hostname"),
         (azure_vm_name, "mapping:azure_vm_name"),
         (public_ip, "mapping:public_ip"),
@@ -252,7 +425,8 @@ def _resolve_target(agent_id: str, agent_state: dict[str, Any] | None) -> dict[s
     metrics = agent_state.get("__agent_metrics", {}) if isinstance(agent_state, dict) else {}
     safe_metrics = metrics if isinstance(metrics, dict) else {}
     config = get_guacamole_config()
-    connection_id, source = _resolve_connection_id(agent_id, safe_metrics)
+    guacamole_mapping = _extract_guacamole_mapping(agent_id, agent_state, safe_metrics)
+    connection_id, source = _resolve_connection_id(agent_id, safe_metrics, guacamole_mapping)
 
     hostname = _clean_string(safe_metrics.get("hostname"))
     azure_vm_name = _clean_string(safe_metrics.get("azure_vm_name"))
@@ -287,11 +461,17 @@ def _resolve_target(agent_id: str, agent_state: dict[str, Any] | None) -> dict[s
         "display": display,
         "allow_embed": config["allow_embed"],
         "connection_type": auth["connection_type"],
+        "guacamole_mapping": guacamole_mapping,
         "resolved_fields": {
             "hostname": hostname,
+            "guacamole_target_host": _clean_string(guacamole_mapping.get("target_host")) or hostname,
             "azure_vm_name": azure_vm_name,
             "public_ip": public_ip,
             "private_ip": private_ip,
+            "guacamole_group": _clean_string(guacamole_mapping.get("group_name")),
+            "guacamole_connection_name": _clean_string(guacamole_mapping.get("connection_name")),
+            "guacamole_username": _clean_string(guacamole_mapping.get("username")),
+            "guacamole_domain": _clean_string(guacamole_mapping.get("domain")),
         },
         "tunnels": {
             "websocket": tunnel_urls["websocket"],
@@ -339,6 +519,15 @@ def _request_guacamole_connections(base_url: str, auth_token: str, data_source: 
         return json.loads(response.read().decode("utf-8"))
 
 
+def _request_guacamole_connection_groups(base_url: str, auth_token: str, data_source: str) -> dict[str, Any]:
+    decoded = _request_guacamole_json(
+        base_url,
+        auth_token,
+        f"api/session/data/{quote(data_source, safe='')}/connectionGroups",
+    )
+    return decoded if isinstance(decoded, dict) else {}
+
+
 def _request_guacamole_json(base_url: str, auth_token: str, path: str) -> Any:
     request = Request(
         _join_url(base_url, path),
@@ -351,6 +540,31 @@ def _request_guacamole_json(base_url: str, auth_token: str, path: str) -> Any:
 
     with urlopen(request, timeout=10) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _request_guacamole_json_with_body(
+    base_url: str,
+    auth_token: str,
+    path: str,
+    method: str,
+    payload: dict[str, Any],
+) -> Any:
+    request = Request(
+        _join_url(base_url, path),
+        data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json; charset=UTF-8",
+            "Accept": "application/json",
+            "Guacamole-Token": auth_token,
+        },
+        method=method,
+    )
+
+    with urlopen(request, timeout=10) as response:
+        raw_body = response.read().decode("utf-8")
+        if not raw_body:
+            return {}
+        return json.loads(raw_body)
 
 
 def _request_guacamole_connection(base_url: str, auth_token: str, data_source: str, connection_id: str) -> dict[str, Any]:
@@ -377,6 +591,285 @@ def _request_guacamole_connection_parameters(base_url: str, auth_token: str, dat
         if clean_key:
             parameters[clean_key] = _clean_string(value)
     return parameters
+
+
+def _decode_template_json(raw_value: str) -> dict[str, Any]:
+    if not raw_value:
+        return {}
+    try:
+        decoded = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _render_template_value(value: Any, values: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        return _render_template(value, values)
+    if isinstance(value, dict):
+        return {
+            _clean_string(key): _render_template_value(item, values)
+            for key, item in value.items()
+            if _clean_string(key)
+        }
+    return value
+
+
+def _normalize_string_dict(payload: dict[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, value in payload.items():
+        clean_key = _clean_string(key)
+        clean_value = _clean_string(value)
+        if clean_key and clean_value:
+            result[clean_key] = clean_value
+    return result
+
+
+def _build_guacamole_template_values(
+    agent_id: str,
+    mapping: dict[str, Any],
+    hostname: str,
+    template_values: dict[str, str] | None = None,
+) -> dict[str, str]:
+    provisioning = _get_provisioning_config()
+    provided_values = template_values or {}
+    return {
+        "agent_id": _clean_string(agent_id),
+        "hostname": _clean_string(hostname),
+        "target_host": _clean_string(mapping.get("target_host")) or _clean_string(hostname),
+        "username": _clean_string(mapping.get("username")),
+        "domain": _clean_string(mapping.get("domain")),
+        "password": _clean_string(provided_values.get("password")) or provisioning["default_password"],
+        "secret": _clean_string(provided_values.get("secret")) or provisioning["default_secret"],
+        "group_name": _clean_string(mapping.get("group_name")),
+        "connection_name": _clean_string(mapping.get("connection_name")),
+    }
+
+
+def _split_guacamole_credentials(mapping: dict[str, Any]) -> tuple[str, str]:
+    explicit_domain = _clean_string(mapping.get("domain"))
+    username = _clean_string(mapping.get("username"))
+    if not username:
+        return "", explicit_domain
+
+    if explicit_domain:
+        if "\\" in username:
+            _, username = username.rsplit("\\", 1)
+        elif "/" in username:
+            _, username = username.rsplit("/", 1)
+        return _clean_string(username), explicit_domain
+
+    for separator in ("\\", "/"):
+        if separator in username:
+            domain, local_username = username.rsplit(separator, 1)
+            return _clean_string(local_username), _clean_string(domain)
+
+    return username, ""
+
+
+def _normalize_attributes(payload: Any) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        return {}
+    return _normalize_string_dict(payload)
+
+
+def _request_guacamole_connection_group(base_url: str, auth_token: str, data_source: str, group_id: str) -> dict[str, Any]:
+    decoded = _request_guacamole_json(
+        base_url,
+        auth_token,
+        f"api/session/data/{quote(data_source, safe='')}/connectionGroups/{quote(group_id, safe='')}",
+    )
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _build_guacamole_group_payload(mapping: dict[str, Any], existing_group: dict[str, Any] | None = None) -> dict[str, Any]:
+    provisioning = _get_provisioning_config()
+    existing_attributes = _normalize_attributes((existing_group or {}).get("attributes"))
+    return {
+        "name": _clean_string(mapping.get("group_name")),
+        "type": "ORGANIZATIONAL",
+        "parentIdentifier": _clean_string((existing_group or {}).get("parentIdentifier")) or provisioning["group_parent_identifier"],
+        "attributes": existing_attributes,
+    }
+
+
+def _group_payload_matches(payload: dict[str, Any], existing_group: dict[str, Any]) -> bool:
+    return (
+        _clean_string(existing_group.get("name")) == _clean_string(payload.get("name"))
+        and _clean_string(existing_group.get("type")) == _clean_string(payload.get("type"))
+        and _clean_string(existing_group.get("parentIdentifier")) == _clean_string(payload.get("parentIdentifier"))
+        and _normalize_attributes(existing_group.get("attributes")) == _normalize_attributes(payload.get("attributes"))
+    )
+
+
+def _connection_payload_matches(
+    payload: dict[str, Any],
+    existing_connection: dict[str, Any],
+    existing_parameters: dict[str, str],
+) -> bool:
+    return (
+        _clean_string(existing_connection.get("name")) == _clean_string(payload.get("name"))
+        and _clean_string(existing_connection.get("protocol")) == _clean_string(payload.get("protocol"))
+        and _clean_string(existing_connection.get("parentIdentifier")) == _clean_string(payload.get("parentIdentifier"))
+        and _normalize_attributes(existing_connection.get("attributes")) == _normalize_attributes(payload.get("attributes"))
+        and _normalize_string_dict(existing_parameters) == _normalize_string_dict(payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {})
+    )
+
+
+def _build_guacamole_connection_payload(
+    agent_id: str,
+    mapping: dict[str, Any],
+    hostname: str,
+    template_values: dict[str, str] | None = None,
+    existing_connection: dict[str, Any] | None = None,
+    existing_parameters: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    provisioning = _get_provisioning_config()
+    values = _build_guacamole_template_values(agent_id, mapping, hostname, template_values)
+    template_parameters = _render_template_value(
+        _decode_template_json(provisioning["parameter_template_json"]),
+        values,
+    )
+    template_attributes = _render_template_value(
+        _decode_template_json(provisioning["attribute_template_json"]),
+        values,
+    )
+
+    parameters = {
+        **_normalize_string_dict(existing_parameters or {}),
+        "hostname": _clean_string(mapping.get("target_host")) or _clean_string(hostname),
+        "port": provisioning["rdp_port"],
+        "resize-method": "display-update",
+        "ignore-cert": "true",
+    }
+    username, domain = _split_guacamole_credentials(mapping)
+    if username:
+        parameters["username"] = username
+    if domain:
+        parameters["domain"] = domain
+    parameters.update(_normalize_string_dict(template_parameters if isinstance(template_parameters, dict) else {}))
+
+    attributes = {
+        **_normalize_attributes((existing_connection or {}).get("attributes")),
+        **_normalize_attributes(template_attributes),
+    }
+
+    return {
+        "name": _clean_string(mapping.get("connection_name")) or _clean_string(hostname),
+        "parentIdentifier": _clean_string(mapping.get("group_identifier")) or provisioning["group_parent_identifier"],
+        "protocol": provisioning["protocol"],
+        "parameters": parameters,
+        "attributes": attributes,
+    }
+
+
+def _upsert_guacamole_group(base_url: str, auth_token: str, data_source: str, mapping: dict[str, Any]) -> dict[str, str]:
+    group_id = _clean_string(mapping.get("group_identifier"))
+    group_name = _clean_string(mapping.get("group_name"))
+    existing_group: dict[str, Any] = {}
+
+    if not group_id:
+        group_id, resolved_name = _resolve_connection_group_identifier(
+            base_url,
+            auth_token,
+            data_source,
+            list(mapping.get("group_candidates") or []),
+        )
+        if resolved_name:
+            group_name = resolved_name
+
+    if group_id:
+        existing_group = _request_guacamole_connection_group(base_url, auth_token, data_source, group_id)
+        if _clean_string(existing_group.get("name")):
+            group_name = _clean_string(existing_group.get("name"))
+
+    payload = _build_guacamole_group_payload({**mapping, "group_name": group_name, "group_identifier": group_id}, existing_group)
+
+    if group_id:
+        if _group_payload_matches(payload, existing_group):
+            return {"identifier": group_id, "name": group_name, "action": "reused"}
+        _request_guacamole_json_with_body(
+            base_url,
+            auth_token,
+            f"api/session/data/{quote(data_source, safe='')}/connectionGroups/{quote(group_id, safe='')}",
+            "PUT",
+            payload,
+        )
+        return {"identifier": group_id, "name": group_name, "action": "updated"}
+
+    created = _request_guacamole_json_with_body(
+        base_url,
+        auth_token,
+        f"api/session/data/{quote(data_source, safe='')}/connectionGroups",
+        "POST",
+        payload,
+    )
+    created_id = _clean_string(created.get("identifier")) if isinstance(created, dict) else _clean_string(created)
+    return {"identifier": created_id, "name": group_name, "action": "created"}
+
+
+def _upsert_guacamole_connection(
+    base_url: str,
+    auth_token: str,
+    data_source: str,
+    agent_id: str,
+    mapping: dict[str, Any],
+    hostname: str,
+    template_values: dict[str, str] | None = None,
+) -> dict[str, str]:
+    connection_id = _clean_string(mapping.get("connection_identifier"))
+    connection_name = _clean_string(mapping.get("connection_name")) or _clean_string(hostname)
+    parent_identifier = _clean_string(mapping.get("group_identifier"))
+    existing_connection: dict[str, Any] = {}
+    existing_parameters: dict[str, str] = {}
+
+    if not connection_id:
+        connection_id, resolved_name = _resolve_connection_identifier(
+            base_url,
+            auth_token,
+            data_source,
+            list(mapping.get("connection_candidates") or []),
+            parent_identifier=parent_identifier,
+        )
+        if resolved_name:
+            connection_name = resolved_name
+
+    if connection_id:
+        existing_connection = _request_guacamole_connection(base_url, auth_token, data_source, connection_id)
+        existing_parameters = _request_guacamole_connection_parameters(base_url, auth_token, data_source, connection_id)
+        if _clean_string(existing_connection.get("name")):
+            connection_name = _clean_string(existing_connection.get("name"))
+
+    payload = _build_guacamole_connection_payload(
+        agent_id,
+        {**mapping, "connection_name": connection_name, "connection_identifier": connection_id},
+        hostname,
+        template_values,
+        existing_connection,
+        existing_parameters,
+    )
+
+    if connection_id:
+        if _connection_payload_matches(payload, existing_connection, existing_parameters):
+            return {"identifier": connection_id, "name": connection_name or payload["name"], "action": "reused"}
+        _request_guacamole_json_with_body(
+            base_url,
+            auth_token,
+            f"api/session/data/{quote(data_source, safe='')}/connections/{quote(connection_id, safe='')}",
+            "PUT",
+            payload,
+        )
+        return {"identifier": connection_id, "name": connection_name or payload["name"], "action": "updated"}
+
+    created = _request_guacamole_json_with_body(
+        base_url,
+        auth_token,
+        f"api/session/data/{quote(data_source, safe='')}/connections",
+        "POST",
+        payload,
+    )
+    created_id = _clean_string(created.get("identifier")) if isinstance(created, dict) else _clean_string(created)
+    return {"identifier": created_id, "name": connection_name or payload["name"], "action": "created"}
 
 
 def _redact_connection_parameters(parameters: dict[str, str]) -> dict[str, str]:
@@ -505,6 +998,7 @@ def inspect_guacamole_connection(agent_id: str, agent_state: dict[str, Any] | No
     target = _resolve_target(agent_id, agent_state)
     auth = _get_auth_config()
     warnings = list(target["warnings"])
+    target = _reconcile_provisioned_target(agent_id, target, warnings)
     timings: dict[str, float] = {}
     started_at = time.perf_counter()
 
@@ -556,6 +1050,8 @@ def inspect_guacamole_connection(agent_id: str, agent_state: dict[str, Any] | No
         record_timing("token", step_started_at)
         auth_token = _clean_string(auth_response.get("authToken"))
         data_source = _clean_string(auth_response.get("dataSource")) or auth["provider"] or "default"
+        mapping = target.get("guacamole_mapping") if isinstance(target.get("guacamole_mapping"), dict) else {}
+        resolved_group_id = _clean_string(mapping.get("group_identifier"))
 
         if not auth_token:
             warnings.append("Guacamole authentication succeeded without returning an auth token.")
@@ -577,17 +1073,34 @@ def inspect_guacamole_connection(agent_id: str, agent_state: dict[str, Any] | No
                 "warnings": warnings,
             }
 
+        if not resolved_group_id:
+            step_started_at = time.perf_counter()
+            resolved_group_id, resolved_group_name = _resolve_connection_group_identifier(
+                target["request_base_url"],
+                auth_token,
+                data_source,
+                list(mapping.get("group_candidates") or []),
+            )
+            record_timing("resolve_group", step_started_at)
+            if resolved_group_id:
+                mapping["group_identifier"] = resolved_group_id
+                if resolved_group_name:
+                    mapping["group_name"] = resolved_group_name
+
         step_started_at = time.perf_counter()
         resolved_connection_id, resolved_connection_name = _resolve_connection_identifier(
             target["request_base_url"],
             auth_token,
             data_source,
-            [
+            _unique_strings(
+                *list(mapping.get("connection_candidates") or []),
                 target["connection_id"],
                 target["connection_label"],
+                _clean_string(target.get("resolved_fields", {}).get("guacamole_target_host")),
                 _clean_string(target.get("resolved_fields", {}).get("hostname")),
                 agent_id,
-            ],
+            ),
+            parent_identifier=resolved_group_id,
         )
         record_timing("resolve_connection", step_started_at)
         if resolved_connection_id:
@@ -676,13 +1189,13 @@ def invalidate_guacamole_token(base_url: str, auth_token: str) -> bool:
         return True
 
 
-def _resolve_connection_identifier(
+def _resolve_connection_group_identifier(
     base_url: str,
     auth_token: str,
     data_source: str,
     candidates: list[str],
 ) -> tuple[str, str]:
-    decoded = _request_guacamole_connections(base_url, auth_token, data_source)
+    decoded = _request_guacamole_connection_groups(base_url, auth_token, data_source)
     if not isinstance(decoded, dict):
         return "", ""
 
@@ -701,6 +1214,124 @@ def _resolve_connection_identifier(
             return item_identifier, item_name
 
     return "", ""
+
+
+def _resolve_connection_identifier(
+    base_url: str,
+    auth_token: str,
+    data_source: str,
+    candidates: list[str],
+    parent_identifier: str = "",
+) -> tuple[str, str]:
+    decoded = _request_guacamole_connections(base_url, auth_token, data_source)
+    if not isinstance(decoded, dict):
+        return "", ""
+
+    normalized_candidates = [candidate.strip().casefold() for candidate in candidates if candidate and candidate.strip()]
+    if not normalized_candidates:
+        return "", ""
+
+    for identifier, payload in decoded.items():
+        clean_identifier = _clean_string(identifier)
+        item = payload if isinstance(payload, dict) else {}
+        item_identifier = _clean_string(item.get("identifier")) or clean_identifier
+        item_name = _clean_string(item.get("name"))
+        item_parent_identifier = _clean_string(item.get("parentIdentifier"))
+        if parent_identifier and item_parent_identifier != parent_identifier:
+            continue
+        values = {item_identifier.casefold(), item_name.casefold(), clean_identifier.casefold()}
+
+        if any(candidate in values for candidate in normalized_candidates):
+            return item_identifier, item_name
+
+    return "", ""
+
+
+def provision_guacamole_agent_target(agent_id: str, hostname: str, mapping: dict[str, Any]) -> dict[str, Any]:
+    next_mapping, _ = provision_guacamole_agent_target_with_diagnostics(agent_id, hostname, mapping)
+    return next_mapping
+
+
+def provision_guacamole_agent_target_with_diagnostics(
+    agent_id: str,
+    hostname: str,
+    mapping: dict[str, Any],
+    *,
+    template_values: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    config = get_guacamole_config()
+    auth = _get_auth_config()
+    provisioning = _get_provisioning_config()
+    base_diagnostics = {
+        "enabled": bool(provisioning["enabled"] and config["enabled"]),
+        "data_source": "",
+        "group": {"action": "skipped", "identifier": _clean_string(mapping.get("group_identifier")), "name": _clean_string(mapping.get("group_name"))},
+        "connection": {
+            "action": "skipped",
+            "identifier": _clean_string(mapping.get("connection_identifier")),
+            "name": _clean_string(mapping.get("connection_name")),
+        },
+        "detail": "",
+    }
+
+    if not provisioning["enabled"]:
+        base_diagnostics["detail"] = "Guacamole auto provisioning is disabled."
+        return dict(mapping), base_diagnostics
+    if not config["enabled"]:
+        base_diagnostics["detail"] = "Guacamole bridge is disabled."
+        return dict(mapping), base_diagnostics
+    if not auth["username"] or not auth["password"]:
+        raise RuntimeError("Guacamole auto provisioning requires GUACAMOLE_AUTH_USERNAME and GUACAMOLE_AUTH_PASSWORD.")
+
+    auth_response = _request_guacamole_token(config["request_base_url"], auth["username"], auth["password"])
+    auth_token = _clean_string(auth_response.get("authToken"))
+    data_source = _clean_string(auth_response.get("dataSource")) or auth["provider"] or "default"
+    if not auth_token:
+        raise RuntimeError("Guacamole auto provisioning could not obtain an auth token.")
+
+    next_mapping = dict(mapping)
+    base_diagnostics["data_source"] = data_source
+    group_result = _upsert_guacamole_group(config["request_base_url"], auth_token, data_source, next_mapping)
+    next_mapping["group_identifier"] = group_result.get("identifier", "")
+    if group_result.get("name"):
+        next_mapping["group_name"] = group_result["name"]
+    base_diagnostics["group"] = {
+        "action": _clean_string(group_result.get("action")) or "updated",
+        "identifier": _clean_string(group_result.get("identifier")),
+        "name": _clean_string(group_result.get("name")),
+    }
+
+    connection_result = _upsert_guacamole_connection(
+        config["request_base_url"],
+        auth_token,
+        data_source,
+        agent_id,
+        next_mapping,
+        hostname,
+        template_values,
+    )
+    next_mapping["connection_identifier"] = connection_result.get("identifier", "")
+    if connection_result.get("name"):
+        next_mapping["connection_name"] = connection_result["name"]
+    base_diagnostics["connection"] = {
+        "action": _clean_string(connection_result.get("action")) or "updated",
+        "identifier": _clean_string(connection_result.get("identifier")),
+        "name": _clean_string(connection_result.get("name")),
+    }
+
+    next_mapping["group_candidates"] = _unique_strings(
+        *list(next_mapping.get("group_candidates") or []),
+        next_mapping.get("group_name"),
+        agent_id,
+    )
+    next_mapping["connection_candidates"] = _unique_strings(
+        *list(next_mapping.get("connection_candidates") or []),
+        next_mapping.get("connection_identifier"),
+        next_mapping.get("connection_name"),
+        hostname,
+        agent_id,
+    )
+    return next_mapping, base_diagnostics
 
 
 def list_guacamole_connections() -> dict[str, Any]:
@@ -832,6 +1463,7 @@ def create_guacamole_client_session(
     target = _resolve_target(agent_id, agent_state)
     auth = _get_auth_config()
     warnings = list(target["warnings"])
+    target = _reconcile_provisioned_target(agent_id, target, warnings)
 
     if not target["enabled"] or not target["connection_id"]:
         return {
@@ -879,6 +1511,7 @@ def create_guacamole_client_session(
 
     auth_token = _clean_string(auth_response.get("authToken"))
     data_source = _clean_string(auth_response.get("dataSource")) or auth["provider"] or "default"
+    mapping = target.get("guacamole_mapping") if isinstance(target.get("guacamole_mapping"), dict) else {}
 
     if not auth_token:
         warnings.append("Guacamole authentication succeeded without returning an auth token.")
@@ -891,18 +1524,35 @@ def create_guacamole_client_session(
 
     resolved_connection_id = target["connection_id"]
     resolved_connection_name = target["connection_label"]
+    resolved_group_id = _clean_string(mapping.get("group_identifier"))
 
     try:
+        if not resolved_group_id:
+            group_lookup_id, group_lookup_name = _resolve_connection_group_identifier(
+                target["request_base_url"],
+                auth_token,
+                data_source,
+                list(mapping.get("group_candidates") or []),
+            )
+            if group_lookup_id:
+                resolved_group_id = group_lookup_id
+                mapping["group_identifier"] = group_lookup_id
+                if group_lookup_name:
+                    mapping["group_name"] = group_lookup_name
+
         lookup_id, lookup_name = _resolve_connection_identifier(
             target["request_base_url"],
             auth_token,
             data_source,
-            [
+            _unique_strings(
+                *list(mapping.get("connection_candidates") or []),
                 target["connection_id"],
                 target["connection_label"],
+                _clean_string(target.get("resolved_fields", {}).get("guacamole_target_host")),
                 _clean_string(target.get("resolved_fields", {}).get("hostname")),
                 agent_id,
-            ],
+            ),
+            parent_identifier=resolved_group_id,
         )
         if lookup_id:
             resolved_connection_id = lookup_id
@@ -910,7 +1560,7 @@ def create_guacamole_client_session(
             resolved_connection_name = lookup_name
         elif not lookup_id:
             warnings.append(
-                "No Guacamole connection identifier matched the resolved agent mapping. Use GUACAMOLE_CONNECTION_MAP_JSON or name the Guacamole connection exactly like the agent hostname."
+                "No Guacamole connection matched the stored agent mapping. Verify the agent group, connection name, or the explicit GUACAMOLE_CONNECTION_MAP_JSON override."
             )
             return {
                 **target,

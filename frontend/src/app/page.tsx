@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useGuacamoleWorkspace } from "@/components/GuacamoleWorkspace";
 import { useAgentSocket } from "@/hooks/useAgentSocket";
 import { useAgentState } from "@/hooks/useAgentStateAPI";
 import { useTasks } from "@/hooks/useTaskAPI";
@@ -8,6 +9,7 @@ import { Sidebar, type MenuPage } from "@/components/Sidebar";
 import { AgentList } from "@/components/AgentList";
 import { AgentDetail } from "@/components/AgentDetail";
 import { DeploymentsPage } from "@/components/DeploymentsPage";
+import { GuacamoleWorkspaceProvider } from "@/components/GuacamoleWorkspace";
 import { TasksPage } from "@/components/TasksPage";
 import { SettingsPage } from "@/components/SettingsPage";
 
@@ -16,10 +18,11 @@ type ProcessFocusTarget = {
   taskId?: string | null;
 };
 
-export default function Dashboard() {
+function DashboardShell() {
   const { agents, connected, sendCommand, latestScreenshotEvent, requestProcessScreenshot, requestDesktopScreenshot, watchProcessManager, unwatchProcessManager } = useAgentSocket();
   const agentIds = Object.keys(agents);
   const { data: taskRows } = useTasks();
+  const { session: guacamoleSession } = useGuacamoleWorkspace();
 
   const [activePage, setActivePage] = useState<MenuPage>("agents");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
@@ -71,6 +74,12 @@ export default function Dashboard() {
         connected={connected}
         agentCount={agentIds.length}
         activeTaskCount={activeTaskCount}
+        guacamoleSession={guacamoleSession ? {
+          agentId: guacamoleSession.agentId,
+          connected: guacamoleSession.connected,
+          minimized: guacamoleSession.minimized,
+          fullscreen: guacamoleSession.fullscreen,
+        } : null}
       />
 
       <main className="flex-1 overflow-y-auto p-6">
@@ -114,5 +123,13 @@ export default function Dashboard() {
         {activePage === "settings" && <SettingsPage />}
       </main>
     </div>
+  );
+}
+
+export default function Dashboard() {
+  return (
+    <GuacamoleWorkspaceProvider>
+      <DashboardShell />
+    </GuacamoleWorkspaceProvider>
   );
 }

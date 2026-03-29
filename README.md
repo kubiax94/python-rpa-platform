@@ -175,6 +175,9 @@ Deployment and server behavior:
 - `VM_AGENT_SERVER_PUBLIC_URL` - explicit public base URL used by server-generated links.
 - `VM_AGENT_SERVER_SUPPRESS_GUAC_TUNNEL_ACCESS_LOGS` - controls noisy Guacamole tunnel access logs.
 - `VM_AGENT_BOOTSTRAP_RECOVERY_WINDOW_SECONDS` - recovery window for bootstrap token handling.
+- `VM_AGENT_JWT_SECRET` - signing secret for agent runtime JWTs.
+- `VM_AGENT_JWT_ISSUER` - issuer claim for agent runtime JWTs.
+- `VM_AGENT_JWT_TTL_SECONDS` - optional JWT lifetime for agent runtime tokens. Leave empty for non-expiring tokens.
 
 Guacamole:
 
@@ -198,9 +201,14 @@ Guacamole:
 The agent reads runtime bootstrap data from `agent.bootstrap.json` and allows environment overrides:
 
 - `VM_AGENT_SERVER_URL`
-- `VM_AGENT_SECRET`
+- `VM_AGENT_ACCESS_TOKEN`
 - `VM_AGENT_BOOTSTRAP_TOKEN`
 - `VM_AGENT_ID`
+
+Legacy compatibility:
+
+- old configs using `secret` are still read and normalized to `access_token`,
+- old env override `VM_AGENT_SECRET` is still accepted as a fallback, but new usage should prefer `VM_AGENT_ACCESS_TOKEN`.
 
 The runtime config loader lives in `vm_agent/src/config/bootstrap_config.py`.
 

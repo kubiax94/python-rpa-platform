@@ -25,7 +25,7 @@ class AgentConnection(IConnection):
     def __init__(self, config):
         self.url = config.get("url", "ws://192.168.1.10:8765/ws")
         self._status: AgentConnectionStatus = AgentConnectionStatus.INIT
-        self.secret = config.get("secret")
+        self.access_token = config.get("access_token") or config.get("secret")
         self.bootstrap_token = config.get("bootstrap_token")
         self.fatal_error_reason: str | None = None
         self._ws : ClientConnection = None
@@ -50,8 +50,8 @@ class AgentConnection(IConnection):
                 pass
             self._read_loop_task = None
 
-    def update_credentials(self, *, secret: str | None = None, bootstrap_token: str | None = None):
-        self.secret = secret
+    def update_credentials(self, *, access_token: str | None = None, secret: str | None = None, bootstrap_token: str | None = None):
+        self.access_token = access_token if access_token is not None else secret
         self.bootstrap_token = bootstrap_token
 
     def stop(self, reason: str | None = None):
@@ -68,7 +68,7 @@ class AgentConnection(IConnection):
     # rest logic can be custom.
     async def open(self, client: IProcesable):  
         try:
-            auth_secret = self.secret or self.bootstrap_token
+            auth_secret = self.access_token or self.bootstrap_token
             headers = NetHeaders.add_bearer_auth_header(auth_secret) if auth_secret else None
 
             if(self._ws and self._status == AgentConnectionStatus.CONNECTED):

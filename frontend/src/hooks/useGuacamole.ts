@@ -46,6 +46,10 @@ export interface GuacamoleSession {
   connection_type: string;
   resolved_fields: {
     hostname?: string;
+    guacamole_target_host?: string;
+    guacamole_group?: string;
+    guacamole_connection_name?: string;
+    guacamole_username?: string;
     azure_vm_name?: string;
     public_ip?: string;
     private_ip?: string;
@@ -71,12 +75,58 @@ export interface GuacamoleClientSession extends GuacamoleSession {
   };
 }
 
+export interface GuacamoleConnectionDiagnostics extends GuacamoleSession {
+  data_source?: string;
+  connection: null | {
+    identifier?: string;
+    name?: string;
+    protocol?: string;
+    parent_identifier?: string;
+    active_connections?: number;
+    last_active?: number | null;
+    attributes?: Record<string, string>;
+  };
+  parameters: Record<string, string>;
+  analysis: {
+    findings: string[];
+    positives: string[];
+    finding_count: number;
+    likely_upstream_bottleneck: boolean;
+  };
+  timings_ms?: Record<string, number>;
+}
+
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
     throw new Error(`HTTP ${res.status}`);
   }
   return res.json();
+}
+
+export async function fetchGuacamoleConfig(): Promise<GuacamoleConfig> {
+  return fetchJSON<GuacamoleConfig>(`${API_BASE}/api/guacamole/config`);
+}
+
+export async function fetchGuacamoleSession(agentId: string): Promise<GuacamoleSession> {
+  return fetchJSON<GuacamoleSession>(`${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole`);
+}
+
+export async function createGuacamoleClientSession(agentId: string): Promise<GuacamoleClientSession> {
+  return fetchJSON<GuacamoleClientSession>(
+    `${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole/session`,
+    { method: "POST" },
+  );
+}
+
+export async function fetchGuacamoleDiagnostics(agentId: string): Promise<GuacamoleConnectionDiagnostics> {
+  return fetchJSON<GuacamoleConnectionDiagnostics>(`${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole/diagnostics`);
+}
+
+export async function revokeGuacamoleClientSession(authToken: string): Promise<void> {
+  await fetch(`${API_BASE}/api/guacamole/session/${encodeURIComponent(authToken)}`, {
+    method: "DELETE",
+  });
 }
 
 export function useGuacamoleConfig() {
@@ -86,7 +136,7 @@ export function useGuacamoleConfig() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      setData(await fetchJSON<GuacamoleConfig>(`${API_BASE}/api/guacamole/config`));
+      setData(await fetchGuacamoleConfig());
     } catch (error) {
       console.error("[useGuacamoleConfig] Error:", error);
       setData(null);
@@ -115,7 +165,7 @@ export function useGuacamoleSession(agentId: string | null) {
 
     setLoading(true);
     try {
-      setData(await fetchJSON<GuacamoleSession>(`${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole`));
+      setData(await fetchGuacamoleSession(agentId));
     } catch (error) {
       console.error("[useGuacamoleSession] Error:", error);
       setData(null);
@@ -131,10 +181,7 @@ export function useGuacamoleSession(agentId: string | null) {
 
     setSessionLoading(true);
     try {
-      const nextData = await fetchJSON<GuacamoleClientSession>(
-        `${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole/session`,
-        { method: "POST" },
-      );
+      const nextData = await createGuacamoleClientSession(agentId);
       setData(nextData);
       return nextData;
     } catch (error) {
@@ -151,9 +198,7 @@ export function useGuacamoleSession(agentId: string | null) {
     }
 
     try {
-      await fetch(`${API_BASE}/api/guacamole/session/${encodeURIComponent(authToken)}`, {
-        method: "DELETE",
-      });
+      await revokeGuacamoleClientSession(authToken);
     } catch (error) {
       console.error("[useGuacamoleSession.revokeClientSession] Error:", error);
     }

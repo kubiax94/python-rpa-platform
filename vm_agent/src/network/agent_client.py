@@ -39,9 +39,9 @@ class AgentClient(IProcesable, IEventAware):
 
         self._connection_manager_task = asyncio.create_task(self.connection_manager(self._connection, self, bus))
 
-    def update_credentials(self, *, secret: str | None = None, bootstrap_token: str | None = None):
+    def update_credentials(self, *, access_token: str | None = None, secret: str | None = None, bootstrap_token: str | None = None):
         if self._connection:
-            self._connection.update_credentials(secret=secret, bootstrap_token=bootstrap_token)
+            self._connection.update_credentials(access_token=access_token, secret=secret, bootstrap_token=bootstrap_token)
 
     def stop(self, reason: str | None = None):
         self._fatal_error_reason = reason
