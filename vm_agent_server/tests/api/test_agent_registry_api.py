@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -28,6 +29,12 @@ class AgentRegistryApiTests(unittest.TestCase):
         server_module.registry_db = fake_registry
 
         app = FastAPI()
+
+        @app.middleware("http")
+        async def inject_admin_session(request, call_next):
+            request.state.user_session = SimpleNamespace(user=SimpleNamespace(roles=["admin"]))
+            return await call_next(request)
+
         app.post("/api/agent-registry/{agent_id}/rotate-token")(server_module.api_rotate_agent_token)
         client = TestClient(app)
 

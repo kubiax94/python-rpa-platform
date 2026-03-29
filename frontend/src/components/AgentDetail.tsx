@@ -13,10 +13,18 @@ import { OverviewPanel } from "./OverviewPanel";
 
 type AgentTab = "overview" | "processes" | "monitored" | "remote" | "commands";
 
+function sanitizeAgentTab(tab: AgentTab, canOperate: boolean): AgentTab {
+  if (!canOperate && (tab === "commands" || tab === "remote")) {
+    return "overview";
+  }
+  return tab;
+}
+
 interface AgentDetailProps {
   agentId: string;
   state: AgentState;
   tasks: Task[];
+  canOperate: boolean;
   sendCommand: (type: string, data: Record<string, unknown>) => void;
   latestScreenshotEvent: ProcessScreenshotState | null;
   onCaptureProcessScreenshot: (agentId: string, pid: number, hwnd?: number) => { agentId: string; targetType: "process"; pid: number; hwnd?: number; requestId: string };
@@ -32,8 +40,8 @@ interface AgentDetailProps {
   } | null;
 }
 
-export function AgentDetail({ agentId, state, tasks, sendCommand, latestScreenshotEvent, onCaptureProcessScreenshot, onCaptureDesktopScreenshot, onWatchProcessManager, onUnwatchProcessManager, onBack, onOpenTaskTracker, preferredTab, focusedProcess }: AgentDetailProps) {
-  const [activeTab, setActiveTab] = useState<AgentTab>(preferredTab ?? "overview");
+export function AgentDetail({ agentId, state, tasks, canOperate, sendCommand, latestScreenshotEvent, onCaptureProcessScreenshot, onCaptureDesktopScreenshot, onWatchProcessManager, onUnwatchProcessManager, onBack, onOpenTaskTracker, preferredTab, focusedProcess }: AgentDetailProps) {
+  const [activeTab, setActiveTab] = useState<AgentTab>(sanitizeAgentTab(preferredTab ?? "overview", canOperate));
 
   const sessions = getAgentSessions(state);
   const agentOnline = isAgentOnline(state);
@@ -169,13 +177,13 @@ export function AgentDetail({ agentId, state, tasks, sendCommand, latestScreensh
           return (
             <button
               key={tile.tab}
-              onClick={() => setActiveTab(tile.tab)}
-              disabled={!agentOnline && tile.tab === "commands"}
+              onClick={() => setActiveTab(sanitizeAgentTab(tile.tab, canOperate))}
+              disabled={(!agentOnline && tile.tab === "commands") || (!canOperate && (tile.tab === "commands" || tile.tab === "remote"))}
               className={`p-4 rounded-lg border transition-all text-left ${
                 isActive
                   ? `${c.bg} ${c.border}`
                   : "border-slate-700 bg-slate-800/30 hover:border-slate-600"
-              } ${!agentOnline && tile.tab === "commands" ? "opacity-50 cursor-not-allowed hover:border-slate-700" : ""}`}
+              } ${((!agentOnline && tile.tab === "commands") || (!canOperate && (tile.tab === "commands" || tile.tab === "remote"))) ? "opacity-50 cursor-not-allowed hover:border-slate-700" : ""}`}
             >
               <div className="flex items-center gap-2 mb-2">
                 <span className={isActive ? c.text : "text-slate-500"}>{tile.icon}</span>
@@ -219,7 +227,7 @@ export function AgentDetail({ agentId, state, tasks, sendCommand, latestScreensh
       {activeTab === "commands" && (
         <div>
           {agentOnline ? (
-            <CommandPanel agentId={agentId} state={state} sendCommand={sendCommand} />
+            <CommandPanel agentId={agentId} state={state} canOperate={canOperate} sendCommand={sendCommand} />
           ) : (
             <div className="rounded-lg border border-slate-700 bg-slate-800/30 p-4 text-sm text-slate-400">
               Agent jest offline. Komendy są zablokowane do czasu ponownego połączenia.
@@ -228,7 +236,7 @@ export function AgentDetail({ agentId, state, tasks, sendCommand, latestScreensh
         </div>
       )}
 
-      <GuacamolePanel agentId={agentId} active={activeTab === "remote"} />
+      <GuacamolePanel agentId={agentId} active={activeTab === "remote"} canOperate={canOperate} />
     </div>
   );
 }

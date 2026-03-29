@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from vm_agent_server.src.api.schemas.task_requests import CreateTaskRequest
-from vm_agent_server.src.task_models import AgentTaskSpec, TaskBuilder
+from vm_agent_server.src.tasks.models import AgentTaskSpec, TaskBuilder
 
 
 class TaskFactory:

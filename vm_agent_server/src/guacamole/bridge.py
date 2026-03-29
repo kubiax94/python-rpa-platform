@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-from vm_agent_server.src.guacamole_mapping import build_agent_guacamole_mapping
+from vm_agent_server.src.guacamole.mapping import build_agent_guacamole_mapping
 
 
 def _parse_bool(value: str | None, default: bool) -> bool:

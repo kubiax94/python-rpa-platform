@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from vm_agent_server.src.guacamole_bridge import build_guacamole_session, provision_guacamole_agent_target_with_diagnostics
+from vm_agent_server.src.guacamole.bridge import build_guacamole_session, provision_guacamole_agent_target_with_diagnostics
 
 
 class GuacamoleBridgeTests(unittest.TestCase):
@@ -63,9 +63,9 @@ class GuacamoleBridgeTests(unittest.TestCase):
         }
 
         with (
-            patch("vm_agent_server.src.guacamole_bridge.get_guacamole_config", return_value={"enabled": True, "request_base_url": "http://guac/guacamole"}),
-            patch("vm_agent_server.src.guacamole_bridge._get_auth_config", return_value={"username": "guac-admin", "password": "secret", "provider": "mysql", "connection_type": "c"}),
-            patch("vm_agent_server.src.guacamole_bridge._get_provisioning_config", return_value={
+            patch("vm_agent_server.src.guacamole.bridge.get_guacamole_config", return_value={"enabled": True, "request_base_url": "http://guac/guacamole"}),
+            patch("vm_agent_server.src.guacamole.bridge._get_auth_config", return_value={"username": "guac-admin", "password": "secret", "provider": "mysql", "connection_type": "c"}),
+            patch("vm_agent_server.src.guacamole.bridge._get_provisioning_config", return_value={
                 "enabled": True,
                 "group_parent_identifier": "ROOT",
                 "protocol": "rdp",
@@ -75,10 +75,10 @@ class GuacamoleBridgeTests(unittest.TestCase):
                 "default_password": "",
                 "default_secret": "",
             }),
-            patch("vm_agent_server.src.guacamole_bridge._request_guacamole_token", return_value={"authToken": "auth-token", "dataSource": "mysql"}),
-            patch("vm_agent_server.src.guacamole_bridge._resolve_connection_group_identifier", return_value=("", "")),
-            patch("vm_agent_server.src.guacamole_bridge._resolve_connection_identifier", return_value=("", "")),
-            patch("vm_agent_server.src.guacamole_bridge._request_guacamole_json_with_body", side_effect=[{"identifier": "grp-1"}, {"identifier": "conn-1"}]) as request_with_body,
+            patch("vm_agent_server.src.guacamole.bridge._request_guacamole_token", return_value={"authToken": "auth-token", "dataSource": "mysql"}),
+            patch("vm_agent_server.src.guacamole.bridge._resolve_connection_group_identifier", return_value=("", "")),
+            patch("vm_agent_server.src.guacamole.bridge._resolve_connection_identifier", return_value=("", "")),
+            patch("vm_agent_server.src.guacamole.bridge._request_guacamole_json_with_body", side_effect=[{"identifier": "grp-1"}, {"identifier": "conn-1"}]) as request_with_body,
         ):
             provisioned, diagnostics = provision_guacamole_agent_target_with_diagnostics(
                 "agent-1",
@@ -110,9 +110,9 @@ class GuacamoleBridgeTests(unittest.TestCase):
         }
 
         with (
-            patch("vm_agent_server.src.guacamole_bridge.get_guacamole_config", return_value={"enabled": True, "request_base_url": "http://guac/guacamole"}),
-            patch("vm_agent_server.src.guacamole_bridge._get_auth_config", return_value={"username": "guac-admin", "password": "secret", "provider": "mysql", "connection_type": "c"}),
-            patch("vm_agent_server.src.guacamole_bridge._get_provisioning_config", return_value={
+            patch("vm_agent_server.src.guacamole.bridge.get_guacamole_config", return_value={"enabled": True, "request_base_url": "http://guac/guacamole"}),
+            patch("vm_agent_server.src.guacamole.bridge._get_auth_config", return_value={"username": "guac-admin", "password": "secret", "provider": "mysql", "connection_type": "c"}),
+            patch("vm_agent_server.src.guacamole.bridge._get_provisioning_config", return_value={
                 "enabled": True,
                 "group_parent_identifier": "ROOT",
                 "protocol": "rdp",
@@ -122,10 +122,10 @@ class GuacamoleBridgeTests(unittest.TestCase):
                 "default_password": "",
                 "default_secret": "",
             }),
-            patch("vm_agent_server.src.guacamole_bridge._request_guacamole_token", return_value={"authToken": "auth-token", "dataSource": "mysql"}),
-            patch("vm_agent_server.src.guacamole_bridge._resolve_connection_group_identifier", return_value=("", "")),
-            patch("vm_agent_server.src.guacamole_bridge._resolve_connection_identifier", return_value=("", "")),
-            patch("vm_agent_server.src.guacamole_bridge._request_guacamole_json_with_body", side_effect=[{"identifier": "grp-1"}, {"identifier": "conn-1"}]) as request_with_body,
+            patch("vm_agent_server.src.guacamole.bridge._request_guacamole_token", return_value={"authToken": "auth-token", "dataSource": "mysql"}),
+            patch("vm_agent_server.src.guacamole.bridge._resolve_connection_group_identifier", return_value=("", "")),
+            patch("vm_agent_server.src.guacamole.bridge._resolve_connection_identifier", return_value=("", "")),
+            patch("vm_agent_server.src.guacamole.bridge._request_guacamole_json_with_body", side_effect=[{"identifier": "grp-1"}, {"identifier": "conn-1"}]) as request_with_body,
         ):
             provision_guacamole_agent_target_with_diagnostics(
                 "agent-1",
@@ -150,9 +150,9 @@ class GuacamoleBridgeTests(unittest.TestCase):
         }
 
         with (
-            patch("vm_agent_server.src.guacamole_bridge.get_guacamole_config", return_value={"enabled": True, "request_base_url": "http://guac/guacamole"}),
-            patch("vm_agent_server.src.guacamole_bridge._get_auth_config", return_value={"username": "guac-admin", "password": "secret", "provider": "mysql", "connection_type": "c"}),
-            patch("vm_agent_server.src.guacamole_bridge._get_provisioning_config", return_value={
+            patch("vm_agent_server.src.guacamole.bridge.get_guacamole_config", return_value={"enabled": True, "request_base_url": "http://guac/guacamole"}),
+            patch("vm_agent_server.src.guacamole.bridge._get_auth_config", return_value={"username": "guac-admin", "password": "secret", "provider": "mysql", "connection_type": "c"}),
+            patch("vm_agent_server.src.guacamole.bridge._get_provisioning_config", return_value={
                 "enabled": True,
                 "group_parent_identifier": "ROOT",
                 "protocol": "rdp",
@@ -162,11 +162,11 @@ class GuacamoleBridgeTests(unittest.TestCase):
                 "default_password": "",
                 "default_secret": "",
             }),
-            patch("vm_agent_server.src.guacamole_bridge._request_guacamole_token", return_value={"authToken": "auth-token", "dataSource": "mysql"}),
-            patch("vm_agent_server.src.guacamole_bridge._request_guacamole_connection_group", return_value={"identifier": "grp-1", "name": "agent-1", "type": "ORGANIZATIONAL", "parentIdentifier": "ROOT", "attributes": {}}),
-            patch("vm_agent_server.src.guacamole_bridge._request_guacamole_connection", return_value={"identifier": "conn-1", "name": "vm-01", "protocol": "rdp", "parentIdentifier": "grp-1", "attributes": {}}),
-            patch("vm_agent_server.src.guacamole_bridge._request_guacamole_connection_parameters", return_value={"hostname": "vm-01", "port": "3389", "resize-method": "display-update", "ignore-cert": "true", "username": "operator", "domain": "DESKTOP-JJULF7D", "password": "rdp-pass", "gateway": "gw"}),
-            patch("vm_agent_server.src.guacamole_bridge._request_guacamole_json_with_body") as request_with_body,
+            patch("vm_agent_server.src.guacamole.bridge._request_guacamole_token", return_value={"authToken": "auth-token", "dataSource": "mysql"}),
+            patch("vm_agent_server.src.guacamole.bridge._request_guacamole_connection_group", return_value={"identifier": "grp-1", "name": "agent-1", "type": "ORGANIZATIONAL", "parentIdentifier": "ROOT", "attributes": {}}),
+            patch("vm_agent_server.src.guacamole.bridge._request_guacamole_connection", return_value={"identifier": "conn-1", "name": "vm-01", "protocol": "rdp", "parentIdentifier": "grp-1", "attributes": {}}),
+            patch("vm_agent_server.src.guacamole.bridge._request_guacamole_connection_parameters", return_value={"hostname": "vm-01", "port": "3389", "resize-method": "display-update", "ignore-cert": "true", "username": "operator", "domain": "DESKTOP-JJULF7D", "password": "rdp-pass", "gateway": "gw"}),
+            patch("vm_agent_server.src.guacamole.bridge._request_guacamole_json_with_body") as request_with_body,
         ):
             _, diagnostics = provision_guacamole_agent_target_with_diagnostics(
                 "agent-1",

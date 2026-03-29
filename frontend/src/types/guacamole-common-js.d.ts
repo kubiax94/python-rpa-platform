@@ -20,12 +20,32 @@ declare module "guacamole-common-js" {
     disconnect(): void;
   }
 
+  interface GuacamoleOutputStream {
+    index: number;
+    sendEnd(): void;
+  }
+
+  interface GuacamoleInputStream {
+    sendAck(message: string, code: number): void;
+    onblob?: ((data: string) => void) | null;
+    onend?: (() => void) | null;
+  }
+
+  interface GuacamoleStringWriter {
+    onack?: ((status: GuacamoleStatus) => void) | null;
+    sendText(text: string): void;
+    sendEnd(): void;
+  }
+
   interface GuacamoleClient {
     onstatechange?: ((state: number) => void) | null;
     onerror?: ((status: GuacamoleStatus) => void) | null;
+    onrequired?: ((parameters: string[]) => void) | null;
+    onargv?: ((stream: GuacamoleInputStream, mimetype: string, name: string) => void) | null;
     connect(data?: string): void;
     disconnect(): void;
     getDisplay(): GuacamoleDisplay;
+    createArgumentValueStream(mimetype: string, name: string): GuacamoleOutputStream;
     sendMouseState(state: unknown, applyDisplayScale?: boolean): void;
     sendKeyEvent(pressed: number, keysym: number): void;
     sendSize(width: number, height: number, dpi?: number): void;
@@ -79,6 +99,7 @@ declare module "guacamole-common-js" {
     ChainedTunnel: new (...tunnels: GuacamoleTunnel[]) => GuacamoleTunnel;
     Mouse: GuacamoleMouseConstructor;
     Keyboard: new (target: Document | HTMLElement) => GuacamoleKeyboard;
+    StringWriter: new (stream: GuacamoleOutputStream) => GuacamoleStringWriter;
   }
 
   const Guacamole: GuacamoleNamespace;

@@ -17,7 +17,7 @@ function statusClasses(status: string): string {
   return "bg-slate-700 text-slate-300";
 }
 
-export function DeploymentsPage() {
+export function DeploymentsPage({ canOperate }: { canOperate: boolean }) {
   const { data: deployments, loading } = useDeployments();
   const [selectedDeploymentId, setSelectedDeploymentId] = useState<string | null>(null);
   const [copiedMessage, setCopiedMessage] = useState<string | null>(null);
@@ -88,31 +88,37 @@ export function DeploymentsPage() {
                   <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${statusClasses(deployment.status)}`}>
                     {deployment.status}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => window.open(getDeploymentInstallerUrl(deployment.id), "_blank", "noopener,noreferrer")}
-                    className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition-colors hover:bg-slate-800"
-                  >
-                    Open installer
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => window.open(getDeploymentPackageUrl(deployment.id), "_blank", "noopener,noreferrer")}
-                    className="rounded-lg bg-cyan-500 px-3 py-1.5 text-sm font-medium text-slate-950 transition-colors hover:bg-cyan-400"
-                  >
-                    Download ZIP
-                  </button>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      await navigator.clipboard.writeText(buildLocalInstallCommand(deployment));
-                      setCopiedMessage("Local install command copied");
-                      setTimeout(() => setCopiedMessage(null), 2500);
-                    }}
-                    className="rounded-lg border border-cyan-500/40 px-3 py-1.5 text-sm font-medium text-cyan-200 transition-colors hover:bg-cyan-500/10"
-                  >
-                    Copy local command
-                  </button>
+                  {canOperate ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => window.open(getDeploymentInstallerUrl(deployment.id), "_blank", "noopener,noreferrer")}
+                        className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition-colors hover:bg-slate-800"
+                      >
+                        Open installer
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => window.open(getDeploymentPackageUrl(deployment.id), "_blank", "noopener,noreferrer")}
+                        className="rounded-lg bg-cyan-500 px-3 py-1.5 text-sm font-medium text-slate-950 transition-colors hover:bg-cyan-400"
+                      >
+                        Download ZIP
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await navigator.clipboard.writeText(buildLocalInstallCommand(deployment));
+                          setCopiedMessage("Local install command copied");
+                          setTimeout(() => setCopiedMessage(null), 2500);
+                        }}
+                        className="rounded-lg border border-cyan-500/40 px-3 py-1.5 text-sm font-medium text-cyan-200 transition-colors hover:bg-cyan-500/10"
+                      >
+                        Copy local command
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-xs text-slate-500">Deployment artifacts require operator role.</span>
+                  )}
                 </div>
               </div>
 

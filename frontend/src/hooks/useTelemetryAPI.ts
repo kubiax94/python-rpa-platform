@@ -1,8 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.10:8765";
+import { API_BASE, fetchJSON } from "@/lib/auth";
 
 export interface MetricRow {
   ts: number;
@@ -38,11 +37,6 @@ export interface AgentSummary {
   last_seen: number;
 }
 
-async function fetchJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
 
 export function useMetrics(agentId: string, pid?: number, rangeMinutes: number = 60) {
   const [data, setData] = useState<MetricRow[]>([]);

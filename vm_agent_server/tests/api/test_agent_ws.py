@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from shared.network.events.example_event import AuthResultEvent, HandshakeData, HandshakeEvent
 from shared.security.agent_jwt import looks_like_jwt
-from vm_agent_server.src.agent_registry_db import AgentRegistryDB, hash_token
+from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB, hash_token
 from vm_agent_server.src.agent_auth import issue_agent_access_token
 from vm_agent_server.src import server as server_module
 

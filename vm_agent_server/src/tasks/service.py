@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vm_agent_server.src.task_db import TaskDB
-from vm_agent_server.src.task_dispatcher import TaskDispatchResult, TaskDispatcher
-from vm_agent_server.src.task_factory import TaskFactory
-from vm_agent_server.src.task_models import TaskSpec
+from vm_agent_server.src.tasks.db import TaskDB
+from vm_agent_server.src.tasks.dispatcher import TaskDispatchResult, TaskDispatcher
+from vm_agent_server.src.tasks.factory import TaskFactory
+from vm_agent_server.src.tasks.models import TaskSpec
 
 
 @dataclass(frozen=True, slots=True)

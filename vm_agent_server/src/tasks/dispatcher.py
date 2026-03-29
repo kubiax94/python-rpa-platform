@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from shared.network.events.example_event import ExecuteTaskData, ExecuteTaskEvent
-from vm_agent_server.src.task_models import AgentTaskSpec, DeploymentTaskSpec, TaskSpec
+from vm_agent_server.src.tasks.models import AgentTaskSpec, DeploymentTaskSpec, TaskSpec
 
 
 @dataclass(frozen=True, slots=True)

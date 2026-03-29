@@ -2,14 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { AgentState } from "@/types/agent";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.10:8765";
-
-async function fetchJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
+import { API_BASE, fetchJSON } from "@/lib/auth";
 
 export function useAgentState(agentId: string | null) {
   const [data, setData] = useState<AgentState | null>(null);

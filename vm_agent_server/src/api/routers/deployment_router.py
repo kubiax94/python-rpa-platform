@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
-from vm_agent_server.src.agent_registry_db import AgentRegistryDB
+from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB
 from vm_agent_server.src.api.schemas.deployment_requests import PrepareDeploymentRequest
 from vm_agent_server.src.api.schemas.deployment_responses import (
     DeploymentConfigResponse,
@@ -14,7 +14,8 @@ from vm_agent_server.src.api.schemas.deployment_responses import (
     GuacamoleProvisioningDiagnosticsResponse,
 )
 from vm_agent_server.src.api.schemas.query_params import DeploymentListQuery
-from vm_agent_server.src.deployment_service import DeploymentService
+from vm_agent_server.src.authz import request_has_minimum_role, role_required_response
+from vm_agent_server.src.services.deployment_service import DeploymentService
 
 
 def build_deployment_router(
@@ -26,6 +27,8 @@ def build_deployment_router(
 
     @router.post("/deployments/prepare", response_model=DeploymentResponse)
     async def api_prepare_deployment(body: PrepareDeploymentRequest, request: Request):
+        if not request_has_minimum_role(request, "operator"):
+            return role_required_response("operator")
         hostname = body.hostname
         agent_id = (body.agent_id or hostname).strip()
         display_name = (body.display_name or hostname).strip()
@@ -37,7 +40,7 @@ def build_deployment_router(
         guacamole_group_name = (body.guacamole_group_name or agent_id).strip()
         guacamole_connection_name = (body.guacamole_connection_name or hostname).strip()
         repo_url = (body.repo_url or deployment_service.get_default_repo_url()).strip()
-        source_ref = body.source_ref.strip() or "main"
+        source_ref = body.source_ref.strip() or deployment_service.get_default_source_ref()
         requested_by = body.requested_by.strip() or "user"
 
         try:
@@ -110,7 +113,9 @@ def build_deployment_router(
         }
 
     @router.get("/deployments/{deployment_id}/installer")
-    async def api_get_deployment_installer(deployment_id: str):
+    async def api_get_deployment_installer(deployment_id: str, request: Request):
+        if not request_has_minimum_role(request, "operator"):
+            return role_required_response("operator")
         deployment = await registry_db.get_deployment(deployment_id)
         if not deployment:
             return JSONResponse({"error": "Not found"}, status_code=404)
@@ -126,7 +131,9 @@ def build_deployment_router(
         return PlainTextResponse(installer_path.read_text(encoding="utf-8"), media_type="text/plain")
 
     @router.get("/deployments/{deployment_id}/package")
-    async def api_get_deployment_package(deployment_id: str):
+    async def api_get_deployment_package(deployment_id: str, request: Request):
+        if not request_has_minimum_role(request, "operator"):
+            return role_required_response("operator")
         deployment = await registry_db.get_deployment(deployment_id)
         if not deployment:
             return JSONResponse({"error": "Not found"}, status_code=404)

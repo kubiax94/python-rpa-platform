@@ -8,7 +8,7 @@ interface AgentCardProps {
   connected: boolean;
   selected: boolean;
   onClick: () => void;
-  onDeploy: () => void;
+  onDeploy?: () => void;
 }
 
 export function AgentCard({ agentId, state, connected, selected, onClick, onDeploy }: AgentCardProps) {
@@ -22,9 +22,17 @@ export function AgentCard({ agentId, state, connected, selected, onClick, onDepl
   );
 
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
-      className={`w-full text-left p-4 rounded-lg border transition-all ${
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onClick();
+        }
+      }}
+      className={`w-full cursor-pointer text-left p-4 rounded-lg border transition-all focus:outline-none focus:ring-2 focus:ring-cyan-500/60 ${
         selected
           ? "border-blue-500 bg-blue-500/10"
           : "border-slate-700 bg-slate-800/50 hover:border-slate-600"
@@ -45,17 +53,19 @@ export function AgentCard({ agentId, state, connected, selected, onClick, onDepl
         <span className="truncate text-xs text-slate-500" title={metrics?.hostname || undefined}>
           {metrics?.hostname || "hostname unknown"}
         </span>
-        <button
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            onDeploy();
-          }}
-          className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1 text-xs font-medium text-cyan-200 hover:bg-cyan-500/20"
-        >
-          Deploy
-        </button>
+        {onDeploy && (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDeploy();
+            }}
+            className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1 text-xs font-medium text-cyan-200 hover:bg-cyan-500/20"
+          >
+            Deploy
+          </button>
+        )}
       </div>
-    </button>
+    </div>
   );
 }

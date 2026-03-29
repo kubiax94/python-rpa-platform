@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vm_agent_server.src.deployment_service import DeploymentService
-from vm_agent_server.src.task_dispatcher import TaskDispatchResult
-from vm_agent_server.src.task_service import TaskSubmissionResult
+from vm_agent_server.src.services.deployment_service import DeploymentService
+from vm_agent_server.src.tasks.dispatcher import TaskDispatchResult
+from vm_agent_server.src.tasks.service import TaskSubmissionResult
 
 
 class FakeRegistryDB:
@@ -83,7 +83,7 @@ class DeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch(
-            "vm_agent_server.src.deployment_service.provision_guacamole_agent_target_with_diagnostics",
+            "vm_agent_server.src.services.deployment_service.provision_guacamole_agent_target_with_diagnostics",
             return_value=(
                 {
                     "group_name": "agent-1",

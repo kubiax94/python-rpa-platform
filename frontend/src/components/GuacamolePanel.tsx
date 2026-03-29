@@ -6,6 +6,7 @@ import { useGuacamoleWorkspace } from "@/components/GuacamoleWorkspace";
 interface GuacamolePanelProps {
   agentId: string;
   active?: boolean;
+  canOperate?: boolean;
 }
 
 function InfoRow({ label, value }: { label: string; value?: string }) {
@@ -17,7 +18,7 @@ function InfoRow({ label, value }: { label: string; value?: string }) {
   );
 }
 
-export function GuacamolePanel({ agentId, active = false }: GuacamolePanelProps) {
+export function GuacamolePanel({ agentId, active = false, canOperate = false }: GuacamolePanelProps) {
   const { data, loading, sessionLoading } = useGuacamoleSession(agentId);
   const {
     session,
@@ -31,6 +32,14 @@ export function GuacamolePanel({ agentId, active = false }: GuacamolePanelProps)
 
   if (!active) {
     return null;
+  }
+
+  if (!canOperate) {
+    return (
+      <div className="rounded-xl border border-slate-700 bg-slate-800/30 p-4 text-sm text-slate-400">
+        Remote desktop session control requires operator role.
+      </div>
+    );
   }
 
   const hasGlobalSession = Boolean(session);

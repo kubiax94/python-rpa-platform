@@ -1,0 +1,23 @@
+{
+    local_certs
+    admin off
+}
+
+orciestra.lab.local {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    @guacamole path /guacamole /guacamole/*
+    reverse_proxy @guacamole 127.0.0.1:8088
+
+    @backend path /api/* /frontend /ws
+    reverse_proxy @backend 127.0.0.1:8765
+
+    reverse_proxy 127.0.0.1:3000
+}

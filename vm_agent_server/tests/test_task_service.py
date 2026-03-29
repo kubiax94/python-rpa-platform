@@ -1,7 +1,7 @@
 import unittest
 
-from vm_agent_server.src.task_dispatcher import TaskDispatchResult, TaskDispatcher
-from vm_agent_server.src.task_service import TaskService
+from vm_agent_server.src.tasks.dispatcher import TaskDispatchResult, TaskDispatcher
+from vm_agent_server.src.tasks.service import TaskService
 
 
 class FakeTaskDB:

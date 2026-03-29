@@ -2,13 +2,14 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useTasks, useTaskLog, createTask, cancelTask, type Task } from "@/hooks/useTaskAPI";
-import { useAgentSocket } from "@/hooks/useAgentSocket";
 import { getAgentSessions, type AgentsMap, type SessionReplica } from "@/types/agent";
 
 interface TasksPageProps {
   onOpenTaskProcess: (agentId: string, pid?: number | null, taskId?: string | null) => void;
   entryMode?: "all" | "active";
   agentFilterId?: string | null;
+  canManageTasks?: boolean;
+  agents: AgentsMap;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -118,9 +119,11 @@ function TaskConsole({ taskId, status }: { taskId: string; status: string }) {
 
 function NewTaskForm({
   agents,
+  canManageTasks,
   onSubmit,
 }: {
   agents: AgentsMap;
+  canManageTasks: boolean;
   onSubmit: (task: Task) => void;
 }) {
   const CUSTOM_SESSION_VALUE = "__custom__";
@@ -208,6 +211,7 @@ function NewTaskForm({
           <select
             value={agentId}
             onChange={(e) => setAgentId(e.target.value)}
+            disabled={!canManageTasks}
             className="w-full rounded bg-slate-800 border border-slate-700 px-2 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
           >
             {agentIds.map((id) => (
@@ -223,6 +227,7 @@ function NewTaskForm({
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
+            disabled={!canManageTasks}
             placeholder="e.g. Restart IIS"
             className="w-full rounded bg-slate-800 border border-slate-700 px-2 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
           />
@@ -235,6 +240,7 @@ function NewTaskForm({
           <select
             value={selectedSession}
             onChange={(e) => setSelectedSession(e.target.value)}
+            disabled={!canManageTasks}
             className="w-full rounded bg-slate-800 border border-slate-700 px-2 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
           >
             <option value="">Default / system session</option>
@@ -250,6 +256,7 @@ function NewTaskForm({
               type="text"
               value={customSession}
               onChange={(e) => setCustomSession(e.target.value)}
+              disabled={!canManageTasks}
               placeholder="DOMAIN\\user"
               className="mt-2 w-full rounded bg-slate-900 border border-slate-700 px-2 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
             />
@@ -261,6 +268,7 @@ function NewTaskForm({
             type="text"
             value={cwd}
             onChange={(e) => setCwd(e.target.value)}
+            disabled={!canManageTasks}
             placeholder="C:\\Scripts"
             className="w-full rounded bg-slate-800 border border-slate-700 px-2 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
           />
@@ -271,6 +279,7 @@ function NewTaskForm({
             type="number"
             value={timeout}
             onChange={(e) => setTimeout(Number(e.target.value))}
+            disabled={!canManageTasks}
             min={10}
             max={86400}
             className="w-full rounded bg-slate-800 border border-slate-700 px-2 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
@@ -283,6 +292,7 @@ function NewTaskForm({
         <textarea
           value={script}
           onChange={(e) => setScript(e.target.value)}
+          disabled={!canManageTasks}
           rows={8}
           placeholder={"# Write your PowerShell script here\nGet-Process | Sort-Object CPU -Descending | Select-Object -First 10"}
           className="w-full rounded bg-[#0d1117] border border-slate-700 px-3 py-2 text-sm text-green-400 font-mono leading-5 focus:outline-none focus:ring-1 focus:ring-cyan-500 resize-y"
@@ -299,7 +309,7 @@ function NewTaskForm({
       <div className="flex justify-end">
         <button
           type="submit"
-          disabled={submitting || !script.trim()}
+          disabled={!canManageTasks || submitting || !script.trim()}
           className="px-4 py-2 rounded bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium text-white transition-colors"
         >
           {submitting ? "Dispatching..." : "Run Task"}
@@ -311,8 +321,7 @@ function NewTaskForm({
 
 // ── Main TasksPage ────────────────────────────────────────────────
 
-export function TasksPage({ onOpenTaskProcess, entryMode = "all", agentFilterId = null }: TasksPageProps) {
-  const { agents } = useAgentSocket();
+export function TasksPage({ agents, onOpenTaskProcess, entryMode = "all", agentFilterId = null, canManageTasks = false }: TasksPageProps) {
   const { data: tasks, refresh } = useTasks(agentFilterId || undefined);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [showNewTask, setShowNewTask] = useState(false);
@@ -360,19 +369,23 @@ export function TasksPage({ onOpenTaskProcess, entryMode = "all", agentFilterId 
             </p>
           )}
         </div>
-        <button
-          onClick={() => setShowNewTask(!showNewTask)}
-          className="px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-sm font-medium text-white transition-colors"
-        >
-          {showNewTask ? "Cancel" : "+ New Task"}
-        </button>
+        {canManageTasks ? (
+          <button
+            onClick={() => setShowNewTask(!showNewTask)}
+            className="px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-sm font-medium text-white transition-colors"
+          >
+            {showNewTask ? "Cancel" : "+ New Task"}
+          </button>
+        ) : (
+          <span className="text-xs text-slate-500">Task dispatch and cancellation require operator role.</span>
+        )}
       </div>
 
       {/* New Task Form */}
       {showNewTask && (
         <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-4">
           <h2 className="text-sm font-semibold text-slate-300 mb-3">New Task</h2>
-          <NewTaskForm agents={agents} onSubmit={handleTaskCreated} />
+          <NewTaskForm agents={agents} canManageTasks={canManageTasks} onSubmit={handleTaskCreated} />
         </div>
       )}
 
@@ -446,7 +459,7 @@ export function TasksPage({ onOpenTaskProcess, entryMode = "all", agentFilterId 
                         Open Live Process
                       </button>
                     )}
-                    {(selectedTask.status === "running" || selectedTask.status === "queued") && (
+                    {canManageTasks && (selectedTask.status === "running" || selectedTask.status === "queued") && (
                       <button
                         onClick={() => handleCancel(selectedTask.id)}
                         className="px-2.5 py-1 rounded bg-red-600 hover:bg-red-500 text-xs font-medium text-white transition-colors"

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from shared.security.agent_jwt import AgentJwtError, TOKEN_PURPOSE_AGENT_WS, issue_agent_jwt, looks_like_jwt, verify_agent_jwt
-from vm_agent_server.src.agent_registry_db import AgentRegistryDB, hash_token
+from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB, hash_token
 
 
 class SharedAgentJwtTests(unittest.TestCase):

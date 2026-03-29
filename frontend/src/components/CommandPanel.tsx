@@ -8,6 +8,7 @@ import { getAgentSessions, type AgentState, type SessionReplica } from "@/types/
 interface CommandPanelProps {
   agentId: string;
   state: AgentState;
+  canOperate: boolean;
   sendCommand: (type: string, data: Record<string, unknown>) => void;
 }
 
@@ -38,7 +39,7 @@ function inferExecutableName(exe: string) {
   return trimmed.split(/[\\/]/).pop() || trimmed;
 }
 
-export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps) {
+export function CommandPanel({ agentId, state, canOperate, sendCommand }: CommandPanelProps) {
   const [activeView, setActiveView] = useState<CommandView>("start-process");
   const [exe, setExe] = useState("");
   const [args, setArgs] = useState("");
@@ -227,6 +228,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                       placeholder="e.g. notepad.exe or C:\app\robot.exe"
                       value={exe}
                       onChange={(e) => setExe(e.target.value)}
+                      disabled={!canOperate}
                     />
                   </div>
                   <div>
@@ -236,6 +238,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                       placeholder="--flag value"
                       value={args}
                       onChange={(e) => setArgs(e.target.value)}
+                      disabled={!canOperate}
                     />
                   </div>
                   <div>
@@ -244,6 +247,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                       className={inputClass}
                       value={session}
                       onChange={(e) => setSession(e.target.value)}
+                      disabled={!canOperate}
                     >
                       <option value="">Default / best available</option>
                       {selectableSessions.map((sessionEntry) => (
@@ -260,6 +264,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                       placeholder="C:\app"
                       value={cwd}
                       onChange={(e) => setCwd(e.target.value)}
+                      disabled={!canOperate}
                     />
                   </div>
                 </div>
@@ -269,6 +274,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                     type="checkbox"
                     checked={monitored}
                     onChange={(e) => setMonitored(e.target.checked)}
+                    disabled={!canOperate}
                     className="rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-blue-500"
                   />
                   Monitored (uses direct agent command)
@@ -283,7 +289,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                   <button
                     type="button"
                     onClick={handleStartProcess}
-                    disabled={!exe.trim() || busy === "process"}
+                    disabled={!canOperate || !exe.trim() || busy === "process"}
                     className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {busy === "process" ? "Dispatching..." : monitored ? "Start Monitored" : "Queue Start Task"}
@@ -315,6 +321,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                     className={`mt-4 ${inputClass}`}
                     value={restartSession}
                     onChange={(e) => setRestartSession(e.target.value)}
+                    disabled={!canOperate}
                   >
                     <option value="">Default session</option>
                     {selectableSessions.map((sessionEntry) => (
@@ -335,7 +342,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                       ].join("\n"),
                       restartSession || undefined
                     )}
-                    disabled={busy === "restart"}
+                    disabled={!canOperate || busy === "restart"}
                     className="mt-4 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     Queue Explorer Restart
@@ -353,7 +360,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                       "Restart Host",
                       ['Write-Output "Restarting host..."', 'Restart-Computer -Force'].join("\n")
                     )}
-                    disabled={busy === "restart"}
+                    disabled={!canOperate || busy === "restart"}
                     className="mt-4 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     Queue Host Restart
@@ -426,6 +433,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                       placeholder="DOMAIN\user"
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
+                      disabled={!canOperate}
                     />
                   </div>
                   <div>
@@ -435,6 +443,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                       className={inputClass}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
+                      disabled={!canOperate}
                     />
                   </div>
                   <div>
@@ -444,6 +453,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                       placeholder="MYDOMAIN"
                       value={domain}
                       onChange={(e) => setDomain(e.target.value)}
+                      disabled={!canOperate}
                     />
                   </div>
                 </div>
@@ -451,7 +461,7 @@ export function CommandPanel({ agentId, state, sendCommand }: CommandPanelProps)
                   <button
                     type="button"
                     onClick={handleCreateSession}
-                    disabled={!username.trim() || busy === "session"}
+                    disabled={!canOperate || !username.trim() || busy === "session"}
                     className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {busy === "session" ? "Sending..." : "Create Session"}

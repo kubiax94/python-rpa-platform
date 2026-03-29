@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 
-from vm_agent_server.src.agent_registry_db import AgentRegistryDB
+from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB
 
 
 class AgentRegistryDBTests(unittest.IsolatedAsyncioTestCase):

@@ -1,12 +1,12 @@
 import unittest
 
-from vm_agent_server.src.task_dispatcher import (
+from vm_agent_server.src.tasks.dispatcher import (
     TaskDispatchResult,
     TaskDispatcher,
     build_agent_task_handler,
     build_deployment_task_handler,
 )
-from vm_agent_server.src.task_models import DeploymentTaskSpec, TaskBuilder
+from vm_agent_server.src.tasks.models import DeploymentTaskSpec, TaskBuilder
 
 
 class TaskDispatcherTests(unittest.IsolatedAsyncioTestCase):

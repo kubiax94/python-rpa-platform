@@ -1,13 +1,12 @@
 import asyncio
-from http.cookies import SimpleCookie
+import json
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from http.cookies import SimpleCookie
 from pathlib import Path
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request as UrlRequest, urlopen
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
@@ -16,34 +15,54 @@ from websockets.asyncio.client import connect as websocket_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from vm_agent_server.src.api.routers.guacamole_router import build_guacamole_router
+from vm_agent_server.src.api.routers.settings_router import build_settings_router
+from vm_agent_server.src.api.routers.users_router import build_users_router
 from vm_agent_server.src.api.schemas.agent_responses import AgentTokenRotationResponse
+from vm_agent_server.src.authz import request_has_minimum_role, role_required_response, websocket_has_minimum_role
 from shared.network.events.example_event import AuthResultData, AuthResultEvent, CaptureProcessScreenshotEvent, CreateSessionEvent, CancelTaskEvent, CancelTaskData, HeartbeatData, SetWindowTrackingData, SetWindowTrackingEvent, StartMonitoredProcessEvent, StartProgramEvent
 from vm_agent_server.src.api.routers.deployment_router import build_deployment_router
 from vm_agent_server.src.api.routers.task_router import build_task_router
-from vm_agent_server.src.agent_registry_db import AgentRegistryDB
-from vm_agent_server.src.deployment_service import DeploymentService
+from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB
 from vm_agent_server.src.network_event_handler import NetworkEventHandler
 from vm_agent_server.src.add_trust_rdp_host import add_trusted_rdp_host, disable_rdp_publisher_warning
 from vm_agent_server.src.agent_runtime import AgentRuntime, HEARTBEAT_TIMEOUT_SECONDS
-from vm_agent_server.src.guacamole_bridge import build_guacamole_proxy_tunnel_urls, build_guacamole_session, create_guacamole_client_session, get_guacamole_config, get_guacamole_request_base_url, inspect_guacamole_connection, invalidate_guacamole_token, list_guacamole_connections
-from vm_agent_server.src.telemetry_db import TelemetryDB
-from vm_agent_server.src.task_db import TaskDB
-from vm_agent_server.src.task_dispatcher import TaskDispatcher, build_agent_task_handler, build_deployment_task_handler
-from vm_agent_server.src.task_service import TaskService
+from vm_agent_server.src.guacamole.bridge import build_guacamole_proxy_tunnel_urls, build_guacamole_session, create_guacamole_client_session, get_guacamole_config, get_guacamole_request_base_url, inspect_guacamole_connection, invalidate_guacamole_token, list_guacamole_connections
+from vm_agent_server.src.settings.db import ServerSettingsDB
+from vm_agent_server.src.settings.service import ServerSettingsService
+from vm_agent_server.src.services import DeploymentService, GuacamoleService, RdpMonitorService, TaskService, UserService
+from vm_agent_server.src.persistence.telemetry_db import TelemetryDB
+from vm_agent_server.src.tasks.db import TaskDB
+from vm_agent_server.src.tasks.dispatcher import TaskDispatcher, build_agent_task_handler, build_deployment_task_handler
 
 telemetry_db = TelemetryDB()
 task_db = TaskDB()
 registry_db = AgentRegistryDB()
+server_settings_db = ServerSettingsDB()
+server_settings_service = ServerSettingsService(server_settings_db)
+user_service = UserService()
 agent_runtime = AgentRuntime()
 frontend_snapshot_event = asyncio.Event()
 frontend_snapshot_broadcast_task: asyncio.Task | None = None
 heartbeat_watchdog_task: asyncio.Task | None = None
+rdp_session_watchdog_task: asyncio.Task | None = None
 logger = logging.getLogger(__name__)
 repo_root = Path(__file__).resolve().parents[2]
 task_dispatcher = TaskDispatcher()
 task_service = TaskService(task_db, task_dispatcher)
-deployment_service = DeploymentService(registry_db, task_db, repo_root)
+deployment_service = DeploymentService(registry_db, task_db, repo_root, server_settings_service=server_settings_service)
 deployment_service.set_task_service(task_service)
+rdp_monitor_service = RdpMonitorService()
+guacamole_service = GuacamoleService(
+    build_proxy_tunnel_urls=build_guacamole_proxy_tunnel_urls,
+    get_guacamole_config=get_guacamole_config,
+    list_guacamole_connections=list_guacamole_connections,
+    build_guacamole_session=build_guacamole_session,
+    inspect_guacamole_connection=inspect_guacamole_connection,
+    create_guacamole_client_session=create_guacamole_client_session,
+    invalidate_guacamole_token=invalidate_guacamole_token,
+    get_guacamole_base_url=get_guacamole_request_base_url,
+    rdp_monitor=rdp_monitor_service,
+)
 
 
 def _is_benign_connection_reset(context: dict[str, object]) -> bool:
@@ -113,9 +132,50 @@ async def _heartbeat_watchdog():
         if snapshot_changed:
             frontend_snapshot_event.set()
 
+
+async def _rdp_session_watchdog():
+    interval = 30
+    raw_interval = (os.getenv("RDP_MONITOR_SWEEP_INTERVAL_SECONDS") or "30").strip()
+    try:
+        interval = max(5, int(raw_interval))
+    except ValueError:
+        interval = 30
+
+    while True:
+        await asyncio.sleep(interval)
+        expired_count = await guacamole_service.expire_idle_sessions()
+        if expired_count > 0:
+            logger.info("Expired %s idle Guacamole session(s)", expired_count)
+
+
+async def _close_frontend_socket(ws: WebSocket) -> None:
+    try:
+        await ws.close(code=1001, reason="Server shutdown")
+    except Exception:
+        pass
+
+
+async def _shutdown_open_connections() -> None:
+    for ws in list(frontend_clients):
+        await _remove_all_process_manager_watchers(ws)
+        await _close_frontend_socket(ws)
+        frontend_watched_agents.pop(ws, None)
+        frontend_clients.discard(ws)
+
+    process_manager_watchers.clear()
+    frontend_watched_agents.clear()
+
+    closed_agents = await agent_runtime.close_all_connections()
+    if closed_agents > 0:
+        logger.info("Closed %s active agent websocket connection(s) during shutdown", closed_agents)
+
+    closed_guacamole = await guacamole_service.close_all_sessions()
+    if closed_guacamole > 0:
+        logger.info("Closed %s tracked Guacamole session(s) during shutdown", closed_guacamole)
+
 @asynccontextmanager
 async def lifespan(app):
-    global frontend_snapshot_broadcast_task, heartbeat_watchdog_task
+    global frontend_snapshot_broadcast_task, heartbeat_watchdog_task, rdp_session_watchdog_task
     loop = asyncio.get_running_loop()
     previous_exception_handler = loop.get_exception_handler()
 
@@ -131,10 +191,19 @@ async def lifespan(app):
     await telemetry_db.start()
     await task_db.start()
     await registry_db.start()
+    await server_settings_db.start()
+    await server_settings_service.initialize()
     await deployment_service.recover_interrupted_deployments()
     frontend_snapshot_broadcast_task = asyncio.create_task(_frontend_snapshot_broadcaster())
     heartbeat_watchdog_task = asyncio.create_task(_heartbeat_watchdog())
+    rdp_session_watchdog_task = asyncio.create_task(_rdp_session_watchdog())
     yield
+    if rdp_session_watchdog_task:
+        rdp_session_watchdog_task.cancel()
+        try:
+            await rdp_session_watchdog_task
+        except asyncio.CancelledError:
+            pass
     if heartbeat_watchdog_task:
         heartbeat_watchdog_task.cancel()
         try:
@@ -147,16 +216,18 @@ async def lifespan(app):
             await frontend_snapshot_broadcast_task
         except asyncio.CancelledError:
             pass
+    await _shutdown_open_connections()
     loop.set_exception_handler(previous_exception_handler)
     await task_db.stop()
     await telemetry_db.stop()
     await registry_db.stop()
+    await server_settings_db.stop()
 
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -165,10 +236,6 @@ app.add_middleware(
 frontend_clients = set()
 process_manager_watchers: dict[str, set[WebSocket]] = {}
 frontend_watched_agents: dict[WebSocket, set[str]] = {}
-guacamole_agent_tokens: dict[str, set[str]] = {}
-guacamole_http_tunnel_tokens: dict[str, str] = {}
-guacamole_http_tunnel_cookies: dict[str, str] = {}
-guacamole_websocket_proxy_supported: bool | None = None
 
 
 def _extract_bearer_token(header_value: str | None) -> str | None:
@@ -178,6 +245,62 @@ def _extract_bearer_token(header_value: str | None) -> str | None:
     if header_value.lower().startswith(prefix):
         return header_value[len(prefix):].strip()
     return None
+
+
+def _extract_access_token_from_scope(scope: dict[str, object]) -> str | None:
+    headers = scope.get("headers") or []
+    if isinstance(headers, list):
+        for raw_name, raw_value in headers:
+            if raw_name.decode("latin-1").lower() == "authorization":
+                return _extract_bearer_token(raw_value.decode("latin-1"))
+
+    query_string = scope.get("query_string", b"")
+    if isinstance(query_string, bytes):
+        raw_query = query_string.decode("utf-8")
+        for pair in raw_query.split("&"):
+            if not pair or "=" not in pair:
+                continue
+            key, value = pair.split("=", 1)
+            if key in {"access_token", "app_access_token"} and value:
+                return value
+    return None
+
+
+async def _reject_frontend_command(ws: WebSocket, minimum_role: str, event_type: str) -> None:
+    await ws.send_json({
+        "kind": "command_rejected",
+        "event_type": event_type,
+        "error": f"{minimum_role.capitalize()} role required",
+    })
+
+
+def _is_public_user_api_path(path: str) -> bool:
+    return path in {
+        "/api/users/auth-config",
+        "/api/users/login/local",
+        "/api/users/login/microsoft",
+        "/api/users/callback/microsoft",
+        "/api/guacamole/tunnel",
+    }
+
+
+@app.middleware("http")
+async def user_auth_middleware(request: Request, call_next):
+    request.state.user_session = None
+    path = request.url.path
+    if request.method == "OPTIONS" or not path.startswith("/api") or _is_public_user_api_path(path):
+        return await call_next(request)
+
+    access_token = _extract_bearer_token(request.headers.get("authorization"))
+    if not access_token:
+        access_token = request.query_params.get("access_token") or request.query_params.get("app_access_token")
+
+    session = user_service.get_session(access_token)
+    if session is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    request.state.user_session = session
+    return await call_next(request)
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -369,6 +492,28 @@ async def websocket_endpoint(ws: WebSocket):
 @app.websocket("/frontend")
 async def frontend_ws(ws: WebSocket):
     await ws.accept()
+
+    try:
+        auth_message = await ws.receive_text()
+        auth_payload = json.loads(auth_message)
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        await ws.close(code=4401, reason="authentication required")
+        return
+
+    if not isinstance(auth_payload, dict) or auth_payload.get("type") != "auth":
+        await ws.close(code=4401, reason="authentication required")
+        return
+
+    access_token = str(auth_payload.get("access_token") or "").strip()
+    session = user_service.get_session(access_token)
+    if session is None:
+        await ws.close(code=4401, reason="unauthorized")
+        return
+
+    ws.state.user_session = session
+    await ws.send_json({"kind": "auth_ok"})
     frontend_clients.add(ws)
     frontend_watched_agents[ws] = set()
     if agent_runtime.latest_stats:
@@ -382,14 +527,23 @@ async def frontend_ws(ws: WebSocket):
 
             match(ev.type):
                 case "start_program":
+                    if not websocket_has_minimum_role(ws, "operator"):
+                        await _reject_frontend_command(ws, "operator", ev.type)
+                        continue
                     spe = StartProgramEvent(data=ev.data)
                     await _forward_frontend_event("start_program", ev.data.agent_id, spe)
 
                 case "start_monitored_process":
+                    if not websocket_has_minimum_role(ws, "operator"):
+                        await _reject_frontend_command(ws, "operator", ev.type)
+                        continue
                     spe = StartMonitoredProcessEvent(data=ev.data)
                     await _forward_frontend_event("start_monitored_process", ev.data.agent_id, spe)
                     
                 case "create_session":
+                    if not websocket_has_minimum_role(ws, "operator"):
+                        await _reject_frontend_command(ws, "operator", ev.type)
+                        continue
                     cse = CreateSessionEvent(data=ev.data)
                     await _forward_frontend_event("create_session", ev.data.agent_id, cse)
 
@@ -537,35 +691,45 @@ async def _remove_all_process_manager_watchers(ws: WebSocket):
 @app.get("/api/metrics")
 async def api_metrics(
     agent_id: str,
+    request: Request,
     pid: int = None,
     from_ts: int = None,
     to_ts: int = None,
     limit: int = Query(default=50000, le=100000)
 ):
+    if not request_has_minimum_role(request, "viewer"):
+        return role_required_response("viewer")
     rows = await telemetry_db.get_metrics(agent_id, pid, from_ts, to_ts, limit)
     return JSONResponse(rows)
 
 
 @app.get("/api/events")
 async def api_events(
+    request: Request,
     agent_id: str = None,
     event_type: str = None,
     from_ts: int = None,
     to_ts: int = None,
     limit: int = Query(default=200, le=5000)
 ):
+    if not request_has_minimum_role(request, "viewer"):
+        return role_required_response("viewer")
     rows = await telemetry_db.get_events(agent_id, event_type, from_ts, to_ts, limit)
     return JSONResponse(rows)
 
 
 @app.get("/api/agents/summary")
-async def api_agents_summary():
+async def api_agents_summary(request: Request):
+    if not request_has_minimum_role(request, "viewer"):
+        return role_required_response("viewer")
     rows = await telemetry_db.get_agents_summary()
     return JSONResponse(rows)
 
 
 @app.get("/api/agents/{agent_id}")
-async def api_agent_state(agent_id: str):
+async def api_agent_state(agent_id: str, request: Request):
+    if not request_has_minimum_role(request, "viewer"):
+        return role_required_response("viewer")
     state = agent_runtime.get_agent_state(agent_id)
     if state is None:
         return JSONResponse({"error": "Not found"}, status_code=404)
@@ -573,12 +737,16 @@ async def api_agent_state(agent_id: str):
 
 
 @app.get("/api/agent-registry")
-async def api_agent_registry(limit: int = Query(default=200, le=500)):
+async def api_agent_registry(request: Request, limit: int = Query(default=200, le=500)):
+    if not request_has_minimum_role(request, "viewer"):
+        return role_required_response("viewer")
     return JSONResponse(await registry_db.get_agents(limit))
 
 
 @app.get("/api/agent-registry/{agent_id}")
-async def api_agent_registry_item(agent_id: str):
+async def api_agent_registry_item(agent_id: str, request: Request):
+    if not request_has_minimum_role(request, "viewer"):
+        return role_required_response("viewer")
     item = await registry_db.get_agent(agent_id)
     if not item:
         return JSONResponse({"error": "Not found"}, status_code=404)
@@ -586,7 +754,9 @@ async def api_agent_registry_item(agent_id: str):
 
 
 @app.post("/api/agent-registry/{agent_id}/rotate-token", response_model=AgentTokenRotationResponse)
-async def api_rotate_agent_token(agent_id: str):
+async def api_rotate_agent_token(agent_id: str, request: Request):
+    if not request_has_minimum_role(request, "admin"):
+        return role_required_response("admin")
     rotated = await registry_db.rotate_agent_token_version(agent_id)
     if not rotated:
         return JSONResponse({"error": "Not found"}, status_code=404)
@@ -676,143 +846,25 @@ def _extract_guacamole_cookie_header(headers: any) -> str:
 
 
 def _proxy_guacamole_tunnel_request(method: str, raw_query: str, body: bytes, headers: dict[str, str]) -> Response:
-    base_url = _get_guacamole_base_url()
-    if not base_url:
-        return JSONResponse({"error": "Guacamole bridge is not configured"}, status_code=503)
-
-    upstream_url = f"{base_url}/tunnel"
-    if raw_query:
-        upstream_url = f"{upstream_url}?{raw_query}"
-
-    request_headers = {
-        "Accept": headers.get("accept") or "*/*",
-    }
-    content_type = headers.get("content-type")
-    if content_type:
-        request_headers["Content-Type"] = content_type
-    tunnel_uuid = _extract_guacamole_tunnel_uuid(raw_query)
-    tunnel_token = headers.get("guacamole-tunnel-token") or guacamole_http_tunnel_tokens.get(tunnel_uuid, "")
-    tunnel_cookie = headers.get("cookie") or guacamole_http_tunnel_cookies.get(tunnel_uuid, "")
-    if tunnel_token:
-        request_headers["Guacamole-Tunnel-Token"] = tunnel_token
-    if tunnel_cookie:
-        request_headers["Cookie"] = tunnel_cookie
-
-    upstream_request = UrlRequest(
-        upstream_url,
-        data=body if method != "GET" else None,
-        headers=request_headers,
-        method=method,
-    )
-
-    try:
-        upstream_response = urlopen(upstream_request, timeout=60)
-    except HTTPError as error:
-        error_body = error.read()
-        if raw_query.startswith(("read:", "write:")):
-            logger.warning(
-                "Guacamole HTTP tunnel request failed: method=%s query=%s status=%s token_forwarded=%s",
-                method,
-                raw_query,
-                error.code,
-                bool(tunnel_token),
-            )
-        if tunnel_uuid and error.code in {404, 410}:
-            guacamole_http_tunnel_tokens.pop(tunnel_uuid, None)
-            guacamole_http_tunnel_cookies.pop(tunnel_uuid, None)
-        return Response(
-            content=error_body,
-            status_code=error.code,
-            headers=_copy_guacamole_response_headers(error.headers),
-            media_type=error.headers.get("Content-Type"),
-        )
-    except URLError as error:
-        return JSONResponse({"error": f"Could not reach Guacamole tunnel: {error.reason}"}, status_code=502)
-    except OSError as error:
-        return JSONResponse({"error": f"Guacamole tunnel proxy failed: {error}"}, status_code=502)
-
-    response_headers = _copy_guacamole_response_headers(upstream_response.headers)
-    media_type = upstream_response.headers.get("Content-Type")
-
-    if raw_query == "connect":
-        connect_uuid = upstream_response.read().decode("utf-8").strip()
-        connect_tunnel_token = response_headers.get("Guacamole-Tunnel-Token", "").strip()
-        connect_cookie_header = _extract_guacamole_cookie_header(upstream_response.headers)
-        upstream_response.close()
-        if connect_uuid and connect_tunnel_token:
-            guacamole_http_tunnel_tokens[connect_uuid] = connect_tunnel_token
-        if connect_uuid and connect_cookie_header:
-            guacamole_http_tunnel_cookies[connect_uuid] = connect_cookie_header
-        return Response(
-            content=connect_uuid,
-            status_code=upstream_response.status,
-            headers=response_headers,
-            media_type=media_type,
-        )
-
-    if method == "GET":
-        async def iter_chunks():
-            reader = getattr(upstream_response, "read1", upstream_response.read)
-            try:
-                while True:
-                    chunk = await asyncio.to_thread(reader, 1024)
-                    if not chunk:
-                        break
-                    yield chunk
-            except asyncio.CancelledError:
-                return
-            finally:
-                upstream_response.close()
-
-        return StreamingResponse(
-            iter_chunks(),
-            status_code=upstream_response.status,
-            headers={
-                **response_headers,
-                "Cache-Control": response_headers.get("Cache-Control", "no-cache"),
-                "X-Accel-Buffering": "no",
-            },
-            media_type=media_type,
-        )
-
-    response_body = upstream_response.read()
-    upstream_response.close()
-    if tunnel_uuid and raw_query.startswith("write:") and upstream_response.status >= 400:
-        guacamole_http_tunnel_tokens.pop(tunnel_uuid, None)
-        guacamole_http_tunnel_cookies.pop(tunnel_uuid, None)
-    return Response(
-        content=response_body,
-        status_code=upstream_response.status,
-        headers=response_headers,
-        media_type=media_type,
-    )
+    return guacamole_service.proxy_tunnel_request(method, raw_query, body, headers)
 
 
 app.include_router(build_task_router(task_service, task_db, _send_to_agent))
 app.include_router(build_deployment_router(deployment_service, registry_db, _resolve_agent_ws_url))
+app.include_router(build_users_router(server_settings_service, user_service, _resolve_public_base_url))
+app.include_router(build_settings_router(server_settings_service, user_service))
 app.include_router(
     build_guacamole_router(
         agent_runtime.get_agent_state,
         registry_db.get_agent,
         _resolve_public_base_url,
-        build_guacamole_proxy_tunnel_urls,
-        get_guacamole_config,
-        list_guacamole_connections,
-        build_guacamole_session,
-        inspect_guacamole_connection,
-        create_guacamole_client_session,
-        invalidate_guacamole_token,
-        _get_guacamole_base_url,
-        _proxy_guacamole_tunnel_request,
-        lambda: guacamole_websocket_proxy_supported,
-        guacamole_agent_tokens,
+        guacamole_service,
     )
 )
 
 
 @app.websocket("/api/guacamole/websocket-tunnel")
 async def api_guacamole_websocket_tunnel(ws: WebSocket):
-    global guacamole_websocket_proxy_supported
     upstream_base = _get_guacamole_websocket_tunnel_url()
     if not upstream_base:
         await ws.close(code=1011, reason="Guacamole bridge is not configured")
@@ -822,15 +874,17 @@ async def api_guacamole_websocket_tunnel(ws: WebSocket):
     upstream_url = f"{upstream_base}?{raw_query}" if raw_query else upstream_base
 
     await ws.accept()
+    tracked_auth_token = await guacamole_service.register_websocket(raw_query, ws)
 
     try:
         async with websocket_connect(upstream_url, max_size=None) as upstream:
-            guacamole_websocket_proxy_supported = True
+            guacamole_service.set_websocket_proxy_supported(True)
             async def client_to_upstream():
                 while True:
                     message = await ws.receive()
                     if message.get("type") == "websocket.disconnect":
                         break
+                    guacamole_service.touch_websocket(raw_query)
                     if message.get("text") is not None:
                         await upstream.send(message["text"])
                     elif message.get("bytes") is not None:
@@ -839,6 +893,7 @@ async def api_guacamole_websocket_tunnel(ws: WebSocket):
             async def upstream_to_client():
                 while True:
                     payload = await upstream.recv()
+                    guacamole_service.touch_websocket(raw_query)
                     if isinstance(payload, bytes):
                         await ws.send_bytes(payload)
                     else:
@@ -849,7 +904,7 @@ async def api_guacamole_websocket_tunnel(ws: WebSocket):
         return
     except InvalidStatus as error:
         if getattr(error, "response", None) is not None and getattr(error.response, "status_code", None) == 404:
-            guacamole_websocket_proxy_supported = False
+            guacamole_service.set_websocket_proxy_supported(False)
             try:
                 await ws.close(code=1000, reason="Guacamole websocket tunnel unavailable")
             except RuntimeError:
@@ -871,7 +926,16 @@ async def api_guacamole_websocket_tunnel(ws: WebSocket):
             await ws.close(code=1011, reason="Guacamole websocket tunnel failed")
         except RuntimeError:
             pass
+    finally:
+        await guacamole_service.unregister_websocket(tracked_auth_token, ws)
 if __name__ == "__main__":
     #disable_rdp_publisher_warning()
     #add_trusted_rdp_host("DESKTOP-JJULF7D")
-    uvicorn.run("vm_agent_server.src.server:app", host="0.0.0.0", port=8765, reload=False)
+    uvicorn.run(
+        "vm_agent_server.src.server:app",
+        host="0.0.0.0",
+        port=8765,
+        reload=False,
+        timeout_keep_alive=1,
+        timeout_graceful_shutdown=2,
+    )

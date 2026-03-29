@@ -14,24 +14,32 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vm_agent_server.src.agent_registry_db import AgentRegistryDB, hash_token
-from vm_agent_server.src.guacamole_bridge import provision_guacamole_agent_target_with_diagnostics
-from vm_agent_server.src.guacamole_mapping import build_agent_guacamole_mapping
-from vm_agent_server.src.task_db import TaskDB
-from vm_agent_server.src.task_dispatcher import TaskDispatchResult
-from vm_agent_server.src.task_models import DeploymentTaskSpec, TaskBuilder
+from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB, hash_token
+from vm_agent_server.src.guacamole.bridge import provision_guacamole_agent_target_with_diagnostics
+from vm_agent_server.src.guacamole.mapping import build_agent_guacamole_mapping
+from vm_agent_server.src.settings.service import ServerSettingsService
+from vm_agent_server.src.tasks.db import TaskDB
+from vm_agent_server.src.tasks.dispatcher import TaskDispatchResult
+from vm_agent_server.src.tasks.models import DeploymentTaskSpec, TaskBuilder
 
 if TYPE_CHECKING:
-    from vm_agent_server.src.task_service import TaskService
+    from vm_agent_server.src.tasks.service import TaskService
 
 logger = logging.getLogger(__name__)
 
 
 class DeploymentService:
-    def __init__(self, registry_db: AgentRegistryDB, task_db: TaskDB, repo_root: Path):
+    def __init__(
+        self,
+        registry_db: AgentRegistryDB,
+        task_db: TaskDB,
+        repo_root: Path,
+        server_settings_service: ServerSettingsService | None = None,
+    ):
         self._registry_db = registry_db
         self._task_db = task_db
         self._repo_root = repo_root
+        self._server_settings_service = server_settings_service
         self._artifacts_root = repo_root / "artifacts" / "deployments"
         self._tasks: dict[str, asyncio.Task] = {}
         self._active_lock = asyncio.Lock()
@@ -40,7 +48,21 @@ class DeploymentService:
     def set_task_service(self, task_service: "TaskService") -> None:
         self._task_service = task_service
 
+    def set_server_settings_service(self, server_settings_service: ServerSettingsService) -> None:
+        self._server_settings_service = server_settings_service
+
+    def get_default_source_ref(self) -> str:
+        if self._server_settings_service is not None:
+            configured = self._server_settings_service.get_snapshot().deployment.default_source_ref.strip()
+            if configured:
+                return configured
+        return "main"
+
     def get_default_repo_url(self) -> str:
+        if self._server_settings_service is not None:
+            configured = self._server_settings_service.get_snapshot().deployment.default_repo_url.strip()
+            if configured:
+                return configured
         override = os.getenv("VM_AGENT_REPO_URL")
         if override:
             return override
@@ -57,12 +79,20 @@ class DeploymentService:
             return ""
 
     def get_artifact_share_root(self) -> str:
+        if self._server_settings_service is not None:
+            configured = self._server_settings_service.get_snapshot().deployment.artifact_share_root.strip()
+            if configured:
+                return configured
         override = os.getenv("VM_AGENT_ARTIFACT_SHARE_ROOT")
         if override:
             return override
         return f"\\\\{socket.gethostname()}\\agent\\DevOPS\\artifacts\\deployments"
 
     def get_latest_installer_share_template(self) -> str:
+        if self._server_settings_service is not None:
+            configured = self._server_settings_service.get_snapshot().deployment.latest_installer_share_template.strip()
+            if configured:
+                return configured
         share_root = self.get_artifact_share_root()
         if share_root.endswith("\\deployments"):
             return share_root[: -len("\\deployments")] + "\\latest\\install-{deployment_id}.ps1"
@@ -72,7 +102,7 @@ class DeploymentService:
         active = await self._registry_db.get_active_deployment()
         return {
             "default_repo_url": self.get_default_repo_url(),
-            "default_source_ref": "main",
+            "default_source_ref": self.get_default_source_ref(),
             "artifact_share_root": self.get_artifact_share_root(),
             "latest_installer_share_template": self.get_latest_installer_share_template(),
             "active_deployment": active,

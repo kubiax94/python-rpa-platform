@@ -1,11 +1,12 @@
 import unittest
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from vm_agent_server.src.api.routers.task_router import build_task_router
-from vm_agent_server.src.task_dispatcher import TaskDispatchResult
-from vm_agent_server.src.task_service import TaskSubmissionResult
+from vm_agent_server.src.tasks.dispatcher import TaskDispatchResult
+from vm_agent_server.src.tasks.service import TaskSubmissionResult
 
 
 class FakeTaskService:
@@ -76,6 +77,12 @@ class TaskRouterTests(unittest.TestCase):
             return True
 
         app = FastAPI()
+
+        @app.middleware("http")
+        async def inject_admin_session(request, call_next):
+            request.state.user_session = SimpleNamespace(user=SimpleNamespace(roles=["admin"]))
+            return await call_next(request)
+
         app.include_router(build_task_router(self.task_service, self.task_db, send_to_agent))
         self.client = TestClient(app)
 

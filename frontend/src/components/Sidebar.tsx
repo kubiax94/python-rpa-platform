@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import type { AuthUser } from "@/lib/auth";
+import { formatRoleLabel, getHighestRole } from "@/lib/rbac";
 import { ConnectionStatus } from "./ConnectionStatus";
 
 export type MenuPage = "agents" | "tasks" | "deployments" | "settings";
@@ -11,6 +13,9 @@ interface SidebarProps {
   connected: boolean;
   agentCount: number;
   activeTaskCount: number;
+  currentUser: AuthUser;
+  onLogout: () => Promise<void>;
+  availablePages: MenuPage[];
   guacamoleSession?: {
     agentId: string;
     connected: boolean;
@@ -59,8 +64,11 @@ const menuItems: { id: MenuPage; label: string; icon: ReactNode }[] = [
   },
 ];
 
-export function Sidebar({ activePage, onNavigate, connected, agentCount, activeTaskCount, guacamoleSession }: SidebarProps) {
+export function Sidebar({ activePage, onNavigate, connected, agentCount, activeTaskCount, currentUser, onLogout, availablePages, guacamoleSession }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const effectiveRoleLabel = formatRoleLabel(getHighestRole(currentUser.roles));
+  const userLabel = currentUser.display_name || currentUser.username || currentUser.email || currentUser.subject;
+  const providerLabel = currentUser.auth_provider === "azure_entra" ? "Microsoft Entra" : currentUser.auth_provider;
 
   return (
     <div
@@ -82,7 +90,7 @@ export function Sidebar({ activePage, onNavigate, connected, agentCount, activeT
 
       {/* Navigation */}
       <nav className="flex-1 py-3 px-2 space-y-1">
-        {menuItems.map((item) => (
+        {menuItems.filter((item) => availablePages.includes(item.id)).map((item) => (
           <button
             key={item.id}
             onClick={() => onNavigate(item.id)}
@@ -111,6 +119,28 @@ export function Sidebar({ activePage, onNavigate, connected, agentCount, activeT
 
       {/* Bottom — connection + collapse */}
       <div className="border-t border-slate-700/50 px-3 py-3 space-y-2">
+        {!collapsed && (
+          <div className="rounded-lg border border-slate-700/80 bg-slate-950/70 px-3 py-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-slate-100">{userLabel}</p>
+                <p className="mt-1 truncate text-[11px] text-slate-500">{currentUser.email || currentUser.username || providerLabel}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void onLogout()}
+                className="rounded-md border border-slate-700 px-2 py-1 text-[11px] font-medium text-slate-300 hover:border-slate-600 hover:bg-slate-900"
+              >
+                Logout
+              </button>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-cyan-200">
+                {effectiveRoleLabel}
+              </span>
+            </div>
+          </div>
+        )}
         {!collapsed && guacamoleSession && (
           <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-3 py-2">
             <div className="flex items-center justify-between gap-2">

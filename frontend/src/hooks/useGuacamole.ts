@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.10:8765";
+import { API_BASE, fetchJSON, withAccessToken } from "@/lib/auth";
 
 export interface GuacamoleDisplayProfile {
   mode: "dynamic" | "fixed";
@@ -50,6 +49,7 @@ export interface GuacamoleSession {
     guacamole_group?: string;
     guacamole_connection_name?: string;
     guacamole_username?: string;
+    guacamole_domain?: string;
     azure_vm_name?: string;
     public_ip?: string;
     private_ip?: string;
@@ -67,6 +67,7 @@ export interface GuacamoleClientSession extends GuacamoleSession {
     data_source: string;
     connection_id: string;
     connection_type: string;
+    resume_tunnel_uuid?: string;
     display: GuacamoleDisplayProfile;
     tunnels: {
       websocket?: string;
@@ -96,12 +97,46 @@ export interface GuacamoleConnectionDiagnostics extends GuacamoleSession {
   timings_ms?: Record<string, number>;
 }
 
-async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
-  }
-  return res.json();
+export interface GuacamoleConnectionSummary {
+  data_source: string;
+  identifier: string;
+  name: string;
+  protocol: string;
+  parent_identifier: string;
+  active_connections?: number | null;
+}
+
+export interface GuacamoleConnectionsResponse {
+  enabled: boolean;
+  configured: boolean;
+  base_url?: string;
+  default_data_source?: string;
+  available_data_sources?: string[];
+  connection_count: number;
+  connections: GuacamoleConnectionSummary[];
+  warnings: string[];
+}
+
+export interface GuacamoleTrackedSessionSummary {
+  auth_token: string;
+  agent_id: string;
+  connection_id: string;
+  data_source: string;
+  created_at: number;
+  last_activity_at: number;
+  idle_seconds: number;
+  tunnel_count: number;
+}
+
+export interface GuacamoleTrackedSessionsResponse {
+  tracked_count: number;
+  idle_timeout_seconds: number;
+  sessions: GuacamoleTrackedSessionSummary[];
+}
+
+export interface GuacamoleKillTrackedSessionsResponse {
+  ok: boolean;
+  closed_count: number;
 }
 
 export async function fetchGuacamoleConfig(): Promise<GuacamoleConfig> {
@@ -112,9 +147,20 @@ export async function fetchGuacamoleSession(agentId: string): Promise<GuacamoleS
   return fetchJSON<GuacamoleSession>(`${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole`);
 }
 
-export async function createGuacamoleClientSession(agentId: string): Promise<GuacamoleClientSession> {
+export async function createGuacamoleClientSession(
+  agentId: string,
+  options?: { forceFresh?: boolean; refreshTunnel?: boolean },
+): Promise<GuacamoleClientSession> {
+  const params = new URLSearchParams();
+  if (options?.forceFresh) {
+    params.set("force_fresh", "true");
+  }
+  if (options?.refreshTunnel) {
+    params.set("refresh_tunnel", "true");
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
   return fetchJSON<GuacamoleClientSession>(
-    `${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole/session`,
+    `${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole/session${query}`,
     { method: "POST" },
   );
 }
@@ -123,10 +169,43 @@ export async function fetchGuacamoleDiagnostics(agentId: string): Promise<Guacam
   return fetchJSON<GuacamoleConnectionDiagnostics>(`${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole/diagnostics`);
 }
 
-export async function revokeGuacamoleClientSession(authToken: string): Promise<void> {
-  await fetch(`${API_BASE}/api/guacamole/session/${encodeURIComponent(authToken)}`, {
-    method: "DELETE",
+export async function fetchGuacamoleConnections(): Promise<GuacamoleConnectionsResponse> {
+  return fetchJSON<GuacamoleConnectionsResponse>(`${API_BASE}/api/guacamole/connections`);
+}
+
+export async function fetchGuacamoleTrackedSessions(): Promise<GuacamoleTrackedSessionsResponse> {
+  return fetchJSON<GuacamoleTrackedSessionsResponse>(`${API_BASE}/api/guacamole/tracked-sessions`);
+}
+
+export async function killAllTrackedGuacamoleSessions(): Promise<GuacamoleKillTrackedSessionsResponse> {
+  return fetchJSON<GuacamoleKillTrackedSessionsResponse>(`${API_BASE}/api/guacamole/tracked-sessions/kill-all`, {
+    method: "POST",
   });
+}
+
+export async function revokeGuacamoleClientSession(authToken: string, options?: { keepalive?: boolean }): Promise<void> {
+  await fetch(withAccessToken(`${API_BASE}/api/guacamole/session/${encodeURIComponent(authToken)}`), {
+    method: "DELETE",
+    keepalive: options?.keepalive,
+  });
+}
+
+export function closeGuacamoleClientSessionOnPageUnload(authToken: string, delaySeconds = 5): boolean {
+  if (!authToken) {
+    return false;
+  }
+
+  const closeUrl = withAccessToken(`${API_BASE}/api/guacamole/session/${encodeURIComponent(authToken)}/close?delay_seconds=${encodeURIComponent(String(delaySeconds))}`);
+  if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+    return navigator.sendBeacon(closeUrl, new Blob([], { type: "text/plain;charset=UTF-8" }));
+  }
+
+  void fetch(closeUrl, {
+    method: "POST",
+    body: "",
+    keepalive: true,
+  });
+  return true;
 }
 
 export function useGuacamoleConfig() {
@@ -209,4 +288,50 @@ export function useGuacamoleSession(agentId: string | null) {
   }, [refresh]);
 
   return { data, loading, sessionLoading, refresh, createClientSession, revokeClientSession };
+}
+
+export function useGuacamoleConnections() {
+  const [data, setData] = useState<GuacamoleConnectionsResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      setData(await fetchGuacamoleConnections());
+    } catch (error) {
+      console.error("[useGuacamoleConnections] Error:", error);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { data, loading, refresh };
+}
+
+export function useGuacamoleTrackedSessions() {
+  const [data, setData] = useState<GuacamoleTrackedSessionsResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      setData(await fetchGuacamoleTrackedSessions());
+    } catch (error) {
+      console.error("[useGuacamoleTrackedSessions] Error:", error);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { data, loading, refresh, setData };
 }

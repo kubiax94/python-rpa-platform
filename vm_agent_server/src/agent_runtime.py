@@ -8,7 +8,7 @@ from fastapi import WebSocket
 from shared.network.events.example_event import HeartbeatData
 
 if TYPE_CHECKING:
-    from vm_agent_server.src.telemetry_db import TelemetryDB
+    from vm_agent_server.src.persistence.telemetry_db import TelemetryDB
 
 HEARTBEAT_TIMEOUT_SECONDS = 15
 
@@ -62,6 +62,18 @@ class AgentRuntime:
 
         self.reset_agent_runtime_state(agent_id)
         return True
+
+    async def close_all_connections(self) -> int:
+        closed_count = 0
+        for agent_id, socket in list(self.active_agents.items()):
+            self.active_agents.pop(agent_id, None)
+            try:
+                await socket.close(code=1001, reason="Server shutdown")
+            except Exception:
+                pass
+            self.reset_agent_runtime_state(agent_id)
+            closed_count += 1
+        return closed_count
 
     def get_agent_socket(self, agent_id: str) -> WebSocket | None:
         return self.active_agents.get(agent_id)

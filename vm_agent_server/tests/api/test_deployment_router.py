@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -45,6 +46,12 @@ class DeploymentRouterTests(unittest.TestCase):
         self.deployment_service = FakeDeploymentService()
         self.registry_db = FakeRegistryDB()
         app = FastAPI()
+
+        @app.middleware("http")
+        async def inject_operator_session(request, call_next):
+            request.state.user_session = SimpleNamespace(user=SimpleNamespace(roles=["operator"]))
+            return await call_next(request)
+
         app.include_router(build_deployment_router(self.deployment_service, self.registry_db, lambda request: "ws://localhost:8765/ws"))
         self.client = TestClient(app)
 

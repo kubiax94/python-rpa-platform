@@ -11,11 +11,12 @@ interface AgentListProps {
   agents: AgentsMap;
   connected: boolean;
   tasks: Task[];
+  canPrepareDeployment: boolean;
   onSelectAgent: (agentId: string) => void;
   onOpenTaskTracker: () => void;
 }
 
-export function AgentList({ agents, connected, tasks, onSelectAgent, onOpenTaskTracker }: AgentListProps) {
+export function AgentList({ agents, connected, tasks, canPrepareDeployment, onSelectAgent, onOpenTaskTracker }: AgentListProps) {
   const agentIds = Object.keys(agents);
   const onlineCount = agentIds.filter((id) => isAgentOnline(agents[id])).length;
   const [deployState, setDeployState] = useState<{ agentId?: string | null; hostname?: string | null; displayName?: string | null } | null>(null);
@@ -25,13 +26,15 @@ export function AgentList({ agents, connected, tasks, onSelectAgent, onOpenTaskT
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-semibold text-slate-100">Agents</h1>
         <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setDeployState({})}
-            className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1.5 text-sm text-cyan-100 transition-colors hover:bg-cyan-500/20"
-          >
-            Prepare Deploy
-          </button>
+          {canPrepareDeployment && (
+            <button
+              type="button"
+              onClick={() => setDeployState({})}
+              className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1.5 text-sm text-cyan-100 transition-colors hover:bg-cyan-500/20"
+            >
+              Prepare Deploy
+            </button>
+          )}
           <ActiveTaskNotifications tasks={tasks} onOpenTasks={onOpenTaskTracker} />
           <span className="text-sm text-slate-500">
             {connected ? `${onlineCount}/${agentIds.length} online` : `${agentIds.length} cached`}
@@ -56,14 +59,14 @@ export function AgentList({ agents, connected, tasks, onSelectAgent, onOpenTaskT
               connected={connected}
               selected={false}
               onClick={() => onSelectAgent(id)}
-              onDeploy={() => {
+              onDeploy={canPrepareDeployment ? () => {
                 const metrics = getAgentMetrics(agents[id]);
                 setDeployState({
                   agentId: id,
                   hostname: metrics?.hostname || id,
                   displayName: metrics?.hostname || id,
                 });
-              }}
+              } : undefined}
             />
           ))}
         </div>
@@ -71,6 +74,7 @@ export function AgentList({ agents, connected, tasks, onSelectAgent, onOpenTaskT
 
       <DeployAgentDialog
         open={deployState !== null}
+        canPrepareDeployment={canPrepareDeployment}
         initialAgentId={deployState?.agentId}
         initialHostname={deployState?.hostname}
         initialDisplayName={deployState?.displayName}

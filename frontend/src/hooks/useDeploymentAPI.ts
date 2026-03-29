@@ -2,8 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTaskLog } from "@/hooks/useTaskAPI";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.10:8765";
+import { API_BASE, fetchJSON, sendJSON } from "@/lib/auth";
 
 export interface AgentDeployment {
   id: string;
@@ -53,23 +52,66 @@ export interface DeploymentConfig {
   active_deployment: AgentDeployment | null;
 }
 
-async function fetchJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+export interface DeploymentDefaultsSettings {
+  default_repo_url: string;
+  default_source_ref: string;
+  artifact_share_root: string;
+  latest_installer_share_template: string;
+}
+
+export interface ServerSettings {
+  deployment: DeploymentDefaultsSettings;
+  identity: {
+    provider: string;
+    provider_locked: boolean;
+    local_bootstrap_available: boolean;
+    session_ttl_seconds: number;
+    azure: {
+      tenant_id: string;
+      client_id: string;
+      authority_url: string;
+      redirect_path: string;
+      scopes: string[];
+      client_secret_configured: boolean;
+      activated_at?: number | null;
+      active: boolean;
+      group_role_mappings: Array<{
+        group_object_id: string;
+        group_name: string;
+        app_roles: string[];
+      }>;
+    };
+  };
+}
+
+export interface IdentitySettingsUpdate {
+  session_ttl_seconds?: number;
+  azure?: {
+    tenant_id?: string;
+    client_id?: string;
+    authority_url?: string;
+    scopes?: string[];
+    client_secret?: string;
+    activate?: boolean;
+    group_role_mappings?: Array<{
+      group_object_id: string;
+      group_name: string;
+      app_roles: string[];
+    }>;
+  };
+}
+
+export interface ServerSettingsUpdate {
+  deployment?: Partial<DeploymentDefaultsSettings>;
+  identity?: IdentitySettingsUpdate;
 }
 
 async function postJSON<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `HTTP ${res.status}`);
-  }
-  return res.json();
+  return sendJSON<T>(url, "POST", body);
+}
+
+async function patchJSON<T>(url: string, body: unknown): Promise<T> {
+  return sendJSON<T>(url, "PATCH", body);
 }
 
 export async function prepareDeployment(body: {
@@ -88,6 +130,14 @@ export async function prepareDeployment(body: {
   requested_by?: string;
 }): Promise<AgentDeployment> {
   return postJSON<AgentDeployment>(`${API_BASE}/api/deployments/prepare`, body);
+}
+
+export async function fetchServerSettings(): Promise<ServerSettings> {
+  return fetchJSON<ServerSettings>(`${API_BASE}/api/settings/server`);
+}
+
+export async function updateServerSettings(body: ServerSettingsUpdate): Promise<ServerSettings> {
+  return patchJSON<ServerSettings>(`${API_BASE}/api/settings/server`, body);
 }
 
 export function getDeploymentInstallerUrl(deploymentId: string): string {
@@ -167,6 +217,29 @@ export function useDeploymentConfig() {
   }, [refresh]);
 
   return { data, loading, refresh };
+}
+
+export function useServerSettings() {
+  const [data, setData] = useState<ServerSettings | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      setData(await fetchServerSettings());
+    } catch (error) {
+      console.error("[useServerSettings] Error:", error);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { data, loading, refresh, setData };
 }
 
 export function useDeployment(deploymentId: string | null) {

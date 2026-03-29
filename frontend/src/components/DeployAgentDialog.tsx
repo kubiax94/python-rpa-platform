@@ -7,6 +7,7 @@ import { GuacamoleProvisioningSummary } from "@/components/GuacamoleProvisioning
 
 interface DeployAgentDialogProps {
   open: boolean;
+  canPrepareDeployment?: boolean;
   initialAgentId?: string | null;
   initialHostname?: string | null;
   initialDisplayName?: string | null;
@@ -25,7 +26,7 @@ function deploymentStatusClass(status: string): string {
   return "bg-amber-500/15 text-amber-300";
 }
 
-export function DeployAgentDialog({ open, initialAgentId, initialHostname, initialDisplayName, onClose }: DeployAgentDialogProps) {
+export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAgentId, initialHostname, initialDisplayName, onClose }: DeployAgentDialogProps) {
   const [agentId, setAgentId] = useState(initialAgentId || "");
   const [hostname, setHostname] = useState(initialHostname || "");
   const [displayName, setDisplayName] = useState(initialDisplayName || "");
@@ -244,11 +245,12 @@ export function DeployAgentDialog({ open, initialAgentId, initialHostname, initi
                   setSubmitting(false);
                 }
               }}
-              disabled={submitting || !hostname.trim() || (!!config?.active_deployment && config.active_deployment.id !== deploymentId)}
+              disabled={!canPrepareDeployment || submitting || !hostname.trim() || (!!config?.active_deployment && config.active_deployment.id !== deploymentId)}
               className="rounded-lg bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 transition-colors hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
             >
               {submitting ? "Preparing..." : "Prepare Deployment"}
             </button>
+            {!canPrepareDeployment && <p className="text-xs text-slate-500">Preparing deployments requires operator role.</p>}
           </div>
 
           <div className="rounded-xl border border-slate-700 bg-slate-950/60 p-4">

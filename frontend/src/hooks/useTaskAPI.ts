@@ -1,8 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.10:8765";
+import { API_BASE, fetchJSON, sendJSON } from "@/lib/auth";
 const MAX_RENDERED_TASK_LOG_CHARS = 200_000;
 
 export interface Task {
@@ -72,23 +71,8 @@ export interface TaskLog {
   size: number;
 }
 
-async function fetchJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-
 async function postJSON<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `HTTP ${res.status}`);
-  }
-  return res.json();
+  return sendJSON<T>(url, "POST", body);
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────

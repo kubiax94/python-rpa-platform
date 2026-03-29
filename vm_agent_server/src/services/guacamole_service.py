@@ -1,0 +1,707 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+from collections.abc import Callable
+from collections.abc import AsyncIterator
+from http.cookies import SimpleCookie
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, urlencode
+from urllib.request import Request as UrlRequest, urlopen
+
+from fastapi import WebSocket
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+from vm_agent_server.src.services.rdp_monitor_service import RdpMonitorService
+
+logger = logging.getLogger(__name__)
+
+
+def _clean_string(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _format_token_marker(value: object) -> str:
+    clean_value = _clean_string(value)
+    if not clean_value:
+        return "<none>"
+    if len(clean_value) <= 12:
+        return clean_value
+    return f"{clean_value[:6]}...{clean_value[-6:]}"
+
+
+class GuacamoleTunnelStreamResponse(Response):
+    def __init__(
+        self,
+        content: AsyncIterator[bytes],
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        media_type: str | None = None,
+    ) -> None:
+        self.body_iterator = content
+        self.status_code = status_code
+        self.media_type = self.media_type if media_type is None else media_type
+        self.background = None
+        self.init_headers(headers)
+
+    async def __call__(self, scope, receive, send) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": self.status_code,
+                "headers": self.raw_headers,
+            }
+        )
+
+        try:
+            async for chunk in self.body_iterator:
+                if not isinstance(chunk, bytes | memoryview):
+                    chunk = chunk.encode(self.charset)
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except (asyncio.CancelledError, OSError):
+            return
+
+
+class GuacamoleService:
+    def __init__(
+        self,
+        *,
+        build_proxy_tunnel_urls: Callable[[str], dict[str, str]],
+        get_guacamole_config: Callable[[], dict[str, Any]],
+        list_guacamole_connections: Callable[[], Any],
+        build_guacamole_session: Callable[[str, dict[str, Any] | None], dict[str, Any]],
+        inspect_guacamole_connection: Callable[[str, dict[str, Any] | None], dict[str, Any]],
+        create_guacamole_client_session: Callable[[str, dict[str, Any] | None, dict[str, str] | None], dict[str, Any]],
+        invalidate_guacamole_token: Callable[[str, str], bool],
+        get_guacamole_base_url: Callable[[], str],
+        rdp_monitor: RdpMonitorService | None = None,
+    ):
+        self._build_proxy_tunnel_urls = build_proxy_tunnel_urls
+        self._get_guacamole_config = get_guacamole_config
+        self._list_guacamole_connections = list_guacamole_connections
+        self._build_guacamole_session = build_guacamole_session
+        self._inspect_guacamole_connection = inspect_guacamole_connection
+        self._create_guacamole_client_session = create_guacamole_client_session
+        self._invalidate_guacamole_token = invalidate_guacamole_token
+        self._get_guacamole_base_url = get_guacamole_base_url
+        self._rdp_monitor = rdp_monitor or RdpMonitorService()
+        self._agent_tokens: dict[str, set[str]] = {}
+        self._http_tunnel_tokens: dict[str, str] = {}
+        self._http_tunnel_cookies: dict[str, str] = {}
+        self._websocket_proxy_supported: bool | None = None
+        self._websockets_by_auth_token: dict[str, set[WebSocket]] = {}
+        self._active_streams: set[Any] = set()
+        self._active_streams_lock = threading.Lock()
+        self._shutdown_requested = threading.Event()
+        self._pending_close_tasks: dict[str, asyncio.Task[None]] = {}
+
+    @property
+    def rdp_monitor(self) -> RdpMonitorService:
+        return self._rdp_monitor
+
+    def get_config(self, public_base_url: str | None = None) -> dict[str, Any]:
+        config = dict(self._get_guacamole_config())
+        if public_base_url:
+            proxy_tunnels = self._build_proxy_tunnel_urls(public_base_url)
+            config["websocket_tunnel_url"] = proxy_tunnels.get("websocket", "")
+            config["http_tunnel_url"] = proxy_tunnels.get("http", "")
+        return config
+
+    def list_connections(self):
+        return self._list_guacamole_connections()
+
+    def list_tracked_sessions(self) -> dict[str, Any]:
+        snapshot = self._rdp_monitor.build_snapshot()
+        snapshot.sort(key=lambda entry: float(entry.get("last_activity_at") or 0), reverse=True)
+        return {
+            "tracked_count": len(snapshot),
+            "idle_timeout_seconds": self._rdp_monitor.idle_timeout_seconds,
+            "sessions": snapshot,
+        }
+
+    def build_session(self, agent_id: str, state: dict[str, Any] | None) -> dict[str, Any]:
+        return self._build_guacamole_session(agent_id, state)
+
+    def inspect_connection(self, agent_id: str, state: dict[str, Any] | None) -> dict[str, Any]:
+        return self._inspect_guacamole_connection(agent_id, state)
+
+    def get_websocket_proxy_supported(self) -> bool | None:
+        return self._websocket_proxy_supported
+
+    def set_websocket_proxy_supported(self, supported: bool | None) -> None:
+        self._websocket_proxy_supported = supported
+
+    def _should_use_websocket_tunnel(self) -> bool:
+        return False
+
+    async def create_client_session(
+        self,
+        agent_id: str,
+        state: dict[str, Any] | None,
+        public_base_url: str,
+        *,
+        force_fresh: bool = False,
+        refresh_tunnel: bool = False,
+    ) -> dict[str, Any]:
+        base_session = self._build_guacamole_session(agent_id, state)
+        proxy_tunnels = self._build_proxy_tunnel_urls(public_base_url)
+        if not self._should_use_websocket_tunnel() or self._websocket_proxy_supported is False:
+            proxy_tunnels["websocket"] = ""
+
+        existing = self._rdp_monitor.get_session_for_agent(agent_id)
+        if existing is not None and force_fresh:
+            self.cancel_scheduled_session_close(existing.auth_token)
+            logger.info(
+                "Refreshing Guacamole session for agent=%s auth=%s connection=%s",
+                agent_id,
+                _format_token_marker(existing.auth_token),
+                existing.connection_id or "<none>",
+            )
+            base_url = self._get_guacamole_base_url()
+            try:
+                if base_url:
+                    await asyncio.to_thread(self._invalidate_guacamole_token, base_url, existing.auth_token)
+            except Exception as error:
+                logger.warning("Failed to invalidate Guacamole session %s before refresh: %s", existing.auth_token, error)
+            await self._forget_session(existing.auth_token, close_reason="Session refreshed")
+            existing = None
+
+        if existing is not None:
+            self.cancel_scheduled_session_close(existing.auth_token)
+            self._rdp_monitor.touch_auth_token(existing.auth_token)
+            resume_tunnel_uuid = ""
+            if refresh_tunnel:
+                resume_tunnel_uuid = await asyncio.to_thread(
+                    self._open_http_tunnel,
+                    existing.auth_token,
+                    existing.data_source,
+                    existing.connection_id,
+                    base_session.get("display") if isinstance(base_session.get("display"), dict) else {},
+                )
+            if not resume_tunnel_uuid:
+                resume_tunnel_uuid = self._rdp_monitor.get_primary_tunnel_uuid(existing.auth_token)
+            if not resume_tunnel_uuid:
+                resume_tunnel_uuid = await asyncio.to_thread(
+                    self._open_http_tunnel,
+                    existing.auth_token,
+                    existing.data_source,
+                    existing.connection_id,
+                    base_session.get("display") if isinstance(base_session.get("display"), dict) else {},
+                )
+            logger.info(
+                "Reusing Guacamole session for agent=%s auth=%s connection=%s resume_tunnel=%s",
+                agent_id,
+                _format_token_marker(existing.auth_token),
+                existing.connection_id or "<none>",
+                resume_tunnel_uuid or "<none>",
+            )
+            return {
+                **base_session,
+                "status": "ready",
+                "tunnels": proxy_tunnels,
+                "client_session": {
+                    "auth_token": existing.auth_token,
+                    "data_source": existing.data_source,
+                    "connection_id": existing.connection_id,
+                    "connection_type": "c",
+                    "display": (base_session.get("display") or {"mode": "dynamic", "dpi": 96}),
+                    "tunnels": proxy_tunnels,
+                    "resume_tunnel_uuid": resume_tunnel_uuid,
+                },
+            }
+
+        logger.info("Creating new Guacamole session for agent=%s force_fresh=%s", agent_id, force_fresh)
+        session = await asyncio.to_thread(self._create_guacamole_client_session, agent_id, state, proxy_tunnels)
+        next_client_session = session.get("client_session") if isinstance(session.get("client_session"), dict) else {}
+        auth_token = _clean_string(next_client_session.get("auth_token"))
+        if auth_token:
+            self._agent_tokens.setdefault(agent_id, set()).add(auth_token)
+            self._rdp_monitor.register_session(
+                agent_id=agent_id,
+                auth_token=auth_token,
+                connection_id=_clean_string(next_client_session.get("connection_id")),
+                data_source=_clean_string(next_client_session.get("data_source")),
+            )
+            resume_tunnel_uuid = await asyncio.to_thread(
+                self._open_http_tunnel,
+                auth_token,
+                _clean_string(next_client_session.get("data_source")),
+                _clean_string(next_client_session.get("connection_id")),
+                next_client_session.get("display") if isinstance(next_client_session.get("display"), dict) else {},
+            )
+            if resume_tunnel_uuid:
+                next_client_session["resume_tunnel_uuid"] = resume_tunnel_uuid
+            logger.info(
+                "Created Guacamole session for agent=%s auth=%s connection=%s resume_tunnel=%s",
+                agent_id,
+                _format_token_marker(auth_token),
+                _clean_string(next_client_session.get("connection_id")) or "<none>",
+                resume_tunnel_uuid or "<none>",
+            )
+        else:
+            logger.warning("Guacamole session creation for agent=%s returned no auth token", agent_id)
+        return session
+
+    async def revoke_client_session(self, auth_token: str) -> bool:
+        self.cancel_scheduled_session_close(auth_token)
+        base_url = self._get_guacamole_base_url()
+        if not base_url:
+            raise RuntimeError("Guacamole bridge is not configured")
+
+        revoked = await asyncio.to_thread(self._invalidate_guacamole_token, base_url, auth_token)
+        await self._forget_session(auth_token)
+        return revoked
+
+    async def expire_idle_sessions(self) -> int:
+        expired_auth_tokens = self._rdp_monitor.get_idle_auth_tokens()
+        if not expired_auth_tokens:
+            return 0
+
+        expired_count = 0
+        base_url = self._get_guacamole_base_url()
+        for auth_token in expired_auth_tokens:
+            try:
+                if base_url:
+                    await asyncio.to_thread(self._invalidate_guacamole_token, base_url, auth_token)
+            except Exception as error:
+                logger.warning("Failed to invalidate idle Guacamole session %s: %s", auth_token, error)
+            await self._forget_session(auth_token, close_reason="Idle timeout")
+            expired_count += 1
+        return expired_count
+
+    async def close_tracked_sessions(self, auth_tokens: list[str] | None = None, *, close_reason: str = "Operator terminated") -> int:
+        self._close_active_streams()
+
+        if auth_tokens is None:
+            auth_tokens = [
+                entry["auth_token"]
+                for entry in self._rdp_monitor.build_snapshot()
+                if isinstance(entry.get("auth_token"), str)
+            ]
+
+        clean_auth_tokens = [_clean_string(auth_token) for auth_token in auth_tokens if _clean_string(auth_token)]
+        if not clean_auth_tokens:
+            return 0
+
+        closed_count = 0
+        base_url = self._get_guacamole_base_url()
+        for auth_token in clean_auth_tokens:
+            self.cancel_scheduled_session_close(auth_token)
+            try:
+                if base_url:
+                    await asyncio.to_thread(self._invalidate_guacamole_token, base_url, auth_token)
+            except Exception as error:
+                logger.warning("Failed to invalidate tracked Guacamole session %s: %s", auth_token, error)
+            await self._forget_session(auth_token, close_reason=close_reason)
+            closed_count += 1
+        return closed_count
+
+    async def close_all_sessions(self) -> int:
+        self._shutdown_requested.set()
+        for auth_token in list(self._pending_close_tasks):
+            self.cancel_scheduled_session_close(auth_token)
+        return await self.close_tracked_sessions(close_reason="Server shutdown")
+
+    def cancel_scheduled_session_close(self, auth_token: str) -> bool:
+        clean_auth_token = _clean_string(auth_token)
+        if not clean_auth_token:
+            return False
+
+        task = self._pending_close_tasks.pop(clean_auth_token, None)
+        if task is None:
+            return False
+
+        task.cancel()
+        return True
+
+    def schedule_session_close(self, auth_token: str, delay_seconds: float = 5.0, *, close_reason: str = "Browser tab closed") -> bool:
+        clean_auth_token = _clean_string(auth_token)
+        if not clean_auth_token:
+            return False
+
+        self.cancel_scheduled_session_close(clean_auth_token)
+        clamped_delay = max(0.5, float(delay_seconds))
+
+        async def close_later() -> None:
+            try:
+                await asyncio.sleep(clamped_delay)
+                if self._shutdown_requested.is_set():
+                    return
+
+                if self._get_guacamole_base_url():
+                    try:
+                        await asyncio.to_thread(self._invalidate_guacamole_token, self._get_guacamole_base_url(), clean_auth_token)
+                    except Exception as error:
+                        logger.warning("Failed to invalidate delayed Guacamole session %s: %s", clean_auth_token, error)
+
+                await self._forget_session(clean_auth_token, close_reason=close_reason)
+            except asyncio.CancelledError:
+                return
+            finally:
+                self._pending_close_tasks.pop(clean_auth_token, None)
+
+        self._pending_close_tasks[clean_auth_token] = asyncio.create_task(close_later())
+        return True
+
+    async def register_websocket(self, raw_query: str, ws: WebSocket) -> str:
+        auth_token = self._extract_auth_token_from_query(raw_query)
+        if not auth_token:
+            return ""
+        sockets = self._websockets_by_auth_token.setdefault(auth_token, set())
+        sockets.add(ws)
+        self._rdp_monitor.touch_auth_token(auth_token)
+        return auth_token
+
+    async def unregister_websocket(self, auth_token: str, ws: WebSocket | None = None) -> None:
+        clean_auth_token = _clean_string(auth_token)
+        if not clean_auth_token:
+            return
+
+        sockets = self._websockets_by_auth_token.get(clean_auth_token)
+        if not sockets:
+            return
+
+        if ws is not None:
+            sockets.discard(ws)
+        if not sockets or ws is None:
+            self._websockets_by_auth_token.pop(clean_auth_token, None)
+
+    def touch_websocket(self, raw_query: str) -> None:
+        auth_token = self._extract_auth_token_from_query(raw_query)
+        if auth_token:
+            self._rdp_monitor.touch_auth_token(auth_token)
+
+    def proxy_tunnel_request(self, method: str, raw_query: str, body: bytes, headers: dict[str, str]) -> Response:
+        if self._shutdown_requested.is_set():
+            return JSONResponse({"error": "Guacamole service is shutting down"}, status_code=503)
+
+        base_url = self._get_guacamole_base_url()
+        if not base_url:
+            return JSONResponse({"error": "Guacamole bridge is not configured"}, status_code=503)
+
+        if raw_query == "connect":
+            resume_tunnel_uuid = self._extract_resume_tunnel_uuid(body)
+            if resume_tunnel_uuid:
+                stored_tunnel_token = self._http_tunnel_tokens.get(resume_tunnel_uuid, "")
+                if stored_tunnel_token:
+                    logger.info(
+                        "Resuming Guacamole HTTP tunnel uuid=%s tunnel_token=%s",
+                        resume_tunnel_uuid,
+                        _format_token_marker(stored_tunnel_token),
+                    )
+                    self._rdp_monitor.touch_tunnel(resume_tunnel_uuid)
+                    return Response(
+                        content=resume_tunnel_uuid,
+                        status_code=200,
+                        headers={
+                            "Guacamole-Tunnel-Token": stored_tunnel_token,
+                            "Cache-Control": "no-cache",
+                        },
+                        media_type="text/plain",
+                    )
+
+        upstream_url = f"{base_url}/tunnel"
+        if raw_query:
+            upstream_url = f"{upstream_url}?{raw_query}"
+
+        tunnel_uuid = self._extract_tunnel_uuid(raw_query)
+        if tunnel_uuid:
+            self._rdp_monitor.touch_tunnel(tunnel_uuid)
+
+        request_headers = {
+            "Accept": headers.get("accept") or "*/*",
+        }
+        content_type = headers.get("content-type")
+        if content_type:
+            request_headers["Content-Type"] = content_type
+
+        tunnel_token = headers.get("guacamole-tunnel-token") or self._http_tunnel_tokens.get(tunnel_uuid, "")
+        tunnel_cookie = headers.get("cookie") or self._http_tunnel_cookies.get(tunnel_uuid, "")
+        if tunnel_token:
+            request_headers["Guacamole-Tunnel-Token"] = tunnel_token
+        if tunnel_cookie:
+            request_headers["Cookie"] = tunnel_cookie
+
+        upstream_request = UrlRequest(
+            upstream_url,
+            data=body if method != "GET" else None,
+            headers=request_headers,
+            method=method,
+        )
+
+        try:
+            upstream_response = urlopen(upstream_request, timeout=60)
+        except HTTPError as error:
+            error_body = error.read()
+            if raw_query.startswith(("read:", "write:")):
+                logger.warning(
+                    "Guacamole HTTP tunnel request failed: method=%s query=%s status=%s token_forwarded=%s",
+                    method,
+                    raw_query,
+                    error.code,
+                    bool(tunnel_token),
+                )
+            if tunnel_uuid and error.code in {404, 410}:
+                self._http_tunnel_tokens.pop(tunnel_uuid, None)
+                self._http_tunnel_cookies.pop(tunnel_uuid, None)
+                self._rdp_monitor.release_tunnel(tunnel_uuid)
+            return Response(
+                content=error_body,
+                status_code=error.code,
+                headers=self._copy_response_headers(error.headers),
+                media_type=error.headers.get("Content-Type"),
+            )
+        except URLError as error:
+            return JSONResponse({"error": f"Could not reach Guacamole tunnel: {error.reason}"}, status_code=502)
+        except OSError as error:
+            return JSONResponse({"error": f"Guacamole tunnel proxy failed: {error}"}, status_code=502)
+
+        response_headers = self._copy_response_headers(upstream_response.headers)
+        media_type = upstream_response.headers.get("Content-Type")
+
+        if raw_query == "connect":
+            connect_uuid = upstream_response.read().decode("utf-8").strip()
+            connect_tunnel_token = response_headers.get("Guacamole-Tunnel-Token", "").strip()
+            connect_cookie_header = self._extract_cookie_header(upstream_response.headers)
+            connect_auth_token = self._extract_auth_token_from_body(body)
+            upstream_response.close()
+            if connect_uuid and connect_tunnel_token:
+                self._http_tunnel_tokens[connect_uuid] = connect_tunnel_token
+            if connect_uuid and connect_cookie_header:
+                self._http_tunnel_cookies[connect_uuid] = connect_cookie_header
+            if connect_uuid and connect_auth_token:
+                self._rdp_monitor.bind_tunnel(connect_auth_token, connect_uuid)
+                logger.info(
+                    "Opened Guacamole HTTP tunnel uuid=%s auth=%s",
+                    connect_uuid,
+                    _format_token_marker(connect_auth_token),
+                )
+            return Response(
+                content=connect_uuid,
+                status_code=upstream_response.status,
+                headers=response_headers,
+                media_type=media_type,
+            )
+
+        if method == "GET":
+            self._register_active_stream(upstream_response)
+
+            async def iter_chunks():
+                reader = getattr(upstream_response, "read1", upstream_response.read)
+                try:
+                    while True:
+                        if self._shutdown_requested.is_set():
+                            break
+                        chunk = await asyncio.to_thread(reader, 1024)
+                        if not chunk:
+                            break
+                        if tunnel_uuid:
+                            self._rdp_monitor.touch_tunnel(tunnel_uuid)
+                        yield chunk
+                except asyncio.CancelledError:
+                    return
+                finally:
+                    self._unregister_active_stream(upstream_response)
+                    upstream_response.close()
+
+            return GuacamoleTunnelStreamResponse(
+                iter_chunks(),
+                status_code=upstream_response.status,
+                headers={
+                    **response_headers,
+                    "Cache-Control": response_headers.get("Cache-Control", "no-cache"),
+                    "X-Accel-Buffering": "no",
+                },
+                media_type=media_type,
+            )
+
+        response_body = upstream_response.read()
+        upstream_response.close()
+        if tunnel_uuid:
+            self._rdp_monitor.touch_tunnel(tunnel_uuid)
+        if tunnel_uuid and raw_query.startswith("write:") and upstream_response.status >= 400:
+            self._http_tunnel_tokens.pop(tunnel_uuid, None)
+            self._http_tunnel_cookies.pop(tunnel_uuid, None)
+            self._rdp_monitor.release_tunnel(tunnel_uuid)
+        return Response(
+            content=response_body,
+            status_code=upstream_response.status,
+            headers=response_headers,
+            media_type=media_type,
+        )
+
+    def _register_active_stream(self, upstream_response: Any) -> None:
+        with self._active_streams_lock:
+            self._active_streams.add(upstream_response)
+
+    def _unregister_active_stream(self, upstream_response: Any) -> None:
+        with self._active_streams_lock:
+            self._active_streams.discard(upstream_response)
+
+    def _close_active_streams(self) -> None:
+        with self._active_streams_lock:
+            streams = list(self._active_streams)
+            self._active_streams.clear()
+
+        for stream in streams:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    async def _forget_session(self, auth_token: str, close_reason: str = "Session closed") -> None:
+        clean_auth_token = _clean_string(auth_token)
+        if not clean_auth_token:
+            return
+
+        tracked_session = self._rdp_monitor.remove_session(clean_auth_token)
+        if tracked_session is not None:
+            for tunnel_uuid in list(tracked_session.tunnel_uuids):
+                self._http_tunnel_tokens.pop(tunnel_uuid, None)
+                self._http_tunnel_cookies.pop(tunnel_uuid, None)
+
+        for agent_id, stored_tokens in list(self._agent_tokens.items()):
+            if clean_auth_token in stored_tokens:
+                stored_tokens.discard(clean_auth_token)
+                if not stored_tokens:
+                    self._agent_tokens.pop(agent_id, None)
+
+        sockets = self._websockets_by_auth_token.pop(clean_auth_token, set())
+        for ws in list(sockets):
+            try:
+                await ws.close(code=1000, reason=close_reason)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _extract_tunnel_uuid(raw_query: str) -> str:
+        if raw_query == "connect":
+            return ""
+        for prefix in ("read:", "write:"):
+            if raw_query.startswith(prefix):
+                remainder = raw_query[len(prefix):]
+                return remainder.split(":", 1)[0].strip()
+        return ""
+
+    @staticmethod
+    def _extract_auth_token_from_query(raw_query: str) -> str:
+        parsed_query = parse_qs(raw_query, keep_blank_values=True)
+        values = parsed_query.get("token") or parsed_query.get("authToken") or []
+        return _clean_string(values[0] if values else "")
+
+    @staticmethod
+    def _extract_auth_token_from_body(body: bytes) -> str:
+        if not body:
+            return ""
+        parsed_body = parse_qs(body.decode("utf-8", errors="ignore"), keep_blank_values=True)
+        values = parsed_body.get("token") or parsed_body.get("authToken") or []
+        return _clean_string(values[0] if values else "")
+
+    @staticmethod
+    def _extract_resume_tunnel_uuid(body: bytes) -> str:
+        if not body:
+            return ""
+        parsed_body = parse_qs(body.decode("utf-8", errors="ignore"), keep_blank_values=True)
+        values = parsed_body.get("GUAC_RESUME_TUNNEL") or parsed_body.get("resume_tunnel_uuid") or []
+        return _clean_string(values[0] if values else "")
+
+    def _open_http_tunnel(
+        self,
+        auth_token: str,
+        data_source: str,
+        connection_id: str,
+        display: dict[str, Any] | None,
+    ) -> str:
+        base_url = self._get_guacamole_base_url()
+        if not base_url:
+            return ""
+
+        display = display if isinstance(display, dict) else {}
+        dpi = int(display.get("dpi") or 96)
+        width = int(display.get("width") or 1280)
+        height = int(display.get("height") or 720)
+        body = urlencode(
+            {
+                "token": auth_token,
+                "GUAC_DATA_SOURCE": data_source,
+                "GUAC_ID": connection_id,
+                "GUAC_TYPE": "c",
+                "GUAC_WIDTH": str(width),
+                "GUAC_HEIGHT": str(height),
+                "GUAC_DPI": str(dpi),
+                "GUAC_TIMEZONE": "UTC",
+            }
+        ).encode("utf-8")
+
+        request = UrlRequest(
+            f"{base_url}/tunnel?connect",
+            data=body,
+            headers={
+                "Accept": "*/*",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=60) as response:
+                connect_uuid = response.read().decode("utf-8").strip()
+                connect_tunnel_token = self._copy_response_headers(response.headers).get("Guacamole-Tunnel-Token", "").strip()
+                connect_cookie_header = self._extract_cookie_header(response.headers)
+        except Exception as error:
+            logger.warning("Failed to pre-open Guacamole HTTP tunnel for %s: %s", connection_id, error)
+            return ""
+
+        if connect_uuid and connect_tunnel_token:
+            self._http_tunnel_tokens[connect_uuid] = connect_tunnel_token
+            self._rdp_monitor.bind_tunnel(auth_token, connect_uuid)
+        if connect_uuid and connect_cookie_header:
+            self._http_tunnel_cookies[connect_uuid] = connect_cookie_header
+
+        return connect_uuid
+
+    @staticmethod
+    def _copy_response_headers(headers: Any) -> dict[str, str]:
+        forwarded: dict[str, str] = {}
+        for header_name in [
+            "Content-Type",
+            "Guacamole-Tunnel-Token",
+            "Guacamole-Status-Code",
+            "Guacamole-Error-Message",
+            "Cache-Control",
+        ]:
+            value = headers.get(header_name)
+            if value:
+                forwarded[header_name] = value
+        return forwarded
+
+    @staticmethod
+    def _extract_cookie_header(headers: Any) -> str:
+        raw_cookie_headers: list[str] = []
+        get_all = getattr(headers, "get_all", None)
+        if callable(get_all):
+            raw_cookie_headers = get_all("Set-Cookie") or []
+
+        if not raw_cookie_headers:
+            single_cookie = headers.get("Set-Cookie")
+            if single_cookie:
+                raw_cookie_headers = [single_cookie]
+
+        if not raw_cookie_headers:
+            return ""
+
+        cookie = SimpleCookie()
+        for raw_cookie in raw_cookie_headers:
+            try:
+                cookie.load(raw_cookie)
+            except Exception:
+                continue
+
+        return "; ".join(f"{morsel.key}={morsel.value}" for morsel in cookie.values())

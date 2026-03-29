@@ -11,9 +11,10 @@ from shared.network.events.example_event import CancelTaskData, CancelTaskEvent
 from vm_agent_server.src.api.schemas.query_params import AuditLogQuery, PipelineListQuery, TaskListQuery, TaskLogQuery
 from vm_agent_server.src.api.schemas.task_responses import AuditEntryResponse, PipelineResponse, PipelineRunLaunchResponse, PipelineRunResponse, TaskCancelResponse, TaskLogResponse, TaskResponse
 from vm_agent_server.src.api.schemas.task_requests import CreatePipelineRequest, CreateTaskRequest, RunPipelineRequest
-from vm_agent_server.src.task_db import TaskDB
-from vm_agent_server.src.task_factory import TaskFactory
-from vm_agent_server.src.task_service import TaskService
+from vm_agent_server.src.authz import request_has_minimum_role, role_required_response
+from vm_agent_server.src.tasks.db import TaskDB
+from vm_agent_server.src.tasks.factory import TaskFactory
+from vm_agent_server.src.tasks.service import TaskService
 
 SendToAgent = Callable[[str, object], Awaitable[bool]]
 
@@ -23,6 +24,8 @@ def build_task_router(task_service: TaskService, task_db: TaskDB, send_to_agent:
 
     @router.post("/tasks", response_model=TaskResponse)
     async def api_create_task(body: CreateTaskRequest, request: Request):
+        if not request_has_minimum_role(request, "operator"):
+            return role_required_response("operator")
         requested_from = request.client.host if request.client else ""
         task_spec = TaskFactory.create_agent_task_from_request(body, requested_from=requested_from)
         submission = await task_service.create_and_dispatch(task_spec)
@@ -41,6 +44,8 @@ def build_task_router(task_service: TaskService, task_db: TaskDB, send_to_agent:
 
     @router.post("/tasks/{task_id}/cancel", response_model=TaskCancelResponse)
     async def api_cancel_task(task_id: str, request: Request):
+        if not request_has_minimum_role(request, "operator"):
+            return role_required_response("operator")
         task = await task_db.get_task(task_id)
         if not task:
             return JSONResponse({"error": "Not found"}, status_code=404)
@@ -62,7 +67,9 @@ def build_task_router(task_service: TaskService, task_db: TaskDB, send_to_agent:
         return PlainTextResponse(result["content"], media_type="text/plain")
 
     @router.post("/pipelines", response_model=PipelineResponse)
-    async def api_create_pipeline(body: CreatePipelineRequest):
+    async def api_create_pipeline(body: CreatePipelineRequest, request: Request):
+        if not request_has_minimum_role(request, "admin"):
+            return role_required_response("admin")
         pipeline_id = uuid4().hex
         return await task_db.create_pipeline(
             pipeline_id,
@@ -85,6 +92,8 @@ def build_task_router(task_service: TaskService, task_db: TaskDB, send_to_agent:
 
     @router.post("/pipelines/{pipeline_id}/run", response_model=PipelineRunLaunchResponse)
     async def api_run_pipeline(pipeline_id: str, body: RunPipelineRequest, request: Request):
+        if not request_has_minimum_role(request, "operator"):
+            return role_required_response("operator")
         requested_from = request.client.host if request.client else ""
 
         pipeline = await task_db.get_pipeline(pipeline_id)

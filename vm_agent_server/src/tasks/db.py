@@ -25,7 +25,7 @@ from typing import Optional
 
 import aiosqlite
 
-from vm_agent_server.src.task_models import TASK_KIND_AGENT, TaskComponent, TaskSpec
+from vm_agent_server.src.tasks.models import TASK_KIND_AGENT, TaskComponent, TaskSpec
 
 logger = logging.getLogger(__name__)
 
