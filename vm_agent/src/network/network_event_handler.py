@@ -1,6 +1,5 @@
 
 import logging
-from typing import override
 from shared.core.event_handler import EventHandler
 from shared.network.events.example_event import AuthResultData, CancelTaskData, CaptureProcessScreenshotData, CreateSessionData, CreateSessionEvent, ExecuteTaskData, HandshakeData, SetWindowTrackingData, StartProgramData
 from shared.network.iconnection import IConnection
@@ -13,14 +12,21 @@ logging.basicConfig(
 )
 
 class NetworkEventHandler(EventHandler):
+    event_types = (
+        "handshake",
+        "auth_result",
+        "start_program",
+        "start_monitored_process",
+        "create_session",
+        "execute_task",
+        "cancel_task",
+        "capture_process_screenshot",
+        "set_window_tracking",
+    )
+
     def __init__(self, bus, prefix = "event."):
         super().__init__(bus, prefix)
 
-    @override
-    def parser(self, raw_data: str | bytes) -> NetworkEvent:
-        return NetworkEvent.model_validate_json(raw_data)
-    
-    @override
     def handle_event(self, event: NetworkEvent, connection: IConnection):
         match(event.type):
 

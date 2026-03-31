@@ -10,6 +10,8 @@ from shared.protocol.network_event import NetworkEvent
 from shared.protocol.session import Session
 from vm_agent.src.core.ievent_aware import IEventAware
 from vm_agent.src.network.agent_connection import AgentConnection, AgentConnectionStatus
+from vm_agent.src.network.agent_session import AgentSession
+from vm_agent.src.network.event_router import EventRouter
 from vm_agent.src.network.network_event_handler import NetworkEventHandler
 
 
@@ -20,6 +22,7 @@ class AgentClient(IProcesable, IEventAware):
         self._connection: AgentConnection = None
         self._session: Session = None
         self._handler: EventHandler = None
+        self._agent_session: AgentSession | None = None
         self.client_id: str = uuid4().hex
         self._connection_manager_task: asyncio.Task = None
         self._fatal_error_reason: str | None = None
@@ -36,6 +39,9 @@ class AgentClient(IProcesable, IEventAware):
 
         self._connection = AgentConnection(config=config)
         self._handler = NetworkEventHandler(bus)
+        router = EventRouter()
+        router.register(self._handler.event_types, self._handler.handle_event)
+        self._agent_session = AgentSession(router, logger=logging.getLogger(__name__))
 
         self._connection_manager_task = asyncio.create_task(self.connection_manager(self._connection, self, bus))
 
@@ -117,8 +123,8 @@ class AgentClient(IProcesable, IEventAware):
         )))
 
     async def process(self, event):
-        ev = self._handler.parser(event)
-        logging.debug(f"Processing: {ev}")
-        
-        self._handler.handle_event(ev, self._connection)
+        if self._agent_session is None:
+            raise RuntimeError("Agent session is not initialized")
+
+        await self._agent_session.process(event, self._connection)
 
