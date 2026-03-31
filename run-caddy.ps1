@@ -4,6 +4,7 @@ param(
     [int]$BackendPort = 8765,
     [int]$GuacamolePort = 8088,
     [switch]$DisableGuacamoleProxy,
+    [switch]$LanHttp,
     [string]$CaddyExecutable = "caddy"
 )
 
@@ -32,6 +33,18 @@ function Resolve-CaddyExecutablePath {
     return $null
 }
 
+function Test-IsIpv4Literal {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+
+    return $Value.Trim() -match '^(?:\d{1,3}\.){3}\d{1,3}$'
+}
+
+$LanHttp = [bool]($LanHttp -or (Test-IsIpv4Literal $Hostname))
+
 $guacamoleRoute = @"
     @guacamole path /guacamole /guacamole/*
     reverse_proxy @guacamole 127.0.0.1:$GuacamolePort
@@ -42,18 +55,32 @@ if ($DisableGuacamoleProxy) {
     $guacamoleRoute = ""
 }
 
-$config = @"
+$siteAddress = if ($LanHttp) { "http://$Hostname" } else { $Hostname }
+$strictTransportHeader = if ($LanHttp) { "" } else { '        Strict-Transport-Security "max-age=31536000; includeSubDomains"`r`n' }
+$globalOptions = if ($LanHttp) {
+@"
+{
+    admin off
+}
+
+"@
+}
+else {
+@"
 {
     local_certs
     admin off
 }
 
-$Hostname {
+"@
+}
+
+$config = @"
+$globalOptions$siteAddress {
     encode zstd gzip
 
     header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
-        X-Content-Type-Options "nosniff"
+${strictTransportHeader}        X-Content-Type-Options "nosniff"
         X-Frame-Options "SAMEORIGIN"
         Referrer-Policy "strict-origin-when-cross-origin"
     }
@@ -67,7 +94,7 @@ ${guacamoleRoute}    @backend path /api/* /frontend /ws
 
 Set-Content -Path $configPath -Value $config -Encoding ASCII
 
-$env:VM_AGENT_SERVER_PUBLIC_URL = "https://$Hostname"
+$env:VM_AGENT_SERVER_PUBLIC_URL = if ($LanHttp) { "http://$Hostname" } else { "https://$Hostname" }
 
 Write-Host "Generated Caddy config: $configPath"
 Write-Host "Backend public URL: $($env:VM_AGENT_SERVER_PUBLIC_URL)"
@@ -77,11 +104,18 @@ if ($Hostname -ieq "localhost") {
 else {
     Write-Host "Remember to point DNS or hosts to this machine for: $Hostname"
 }
+if ($LanHttp) {
+    Write-Host "LAN HTTP mode is active. Caddy will listen on port 80 without TLS."
+}
+else {
+    Write-Host "TLS uses Caddy local certificates. Remote clients must trust the local Caddy CA."
+}
 if ($DisableGuacamoleProxy) {
     Write-Host "Guacamole reverse proxy route is disabled in Caddy. FastAPI can still bridge to an external Guacamole via GUACAMOLE_BASE_URL."
 }
 else {
-    Write-Host "Guacamole stays on http://127.0.0.1:$GuacamolePort and is exposed through https://$Hostname/guacamole/"
+    $guacamolePublicUrl = if ($LanHttp) { "http://$Hostname/guacamole/" } else { "https://$Hostname/guacamole/" }
+    Write-Host "Guacamole stays on http://127.0.0.1:$GuacamolePort and is exposed through $guacamolePublicUrl"
 }
 
 $caddyExecutablePath = Resolve-CaddyExecutablePath -Executable $CaddyExecutable

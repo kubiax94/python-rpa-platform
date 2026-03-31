@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Callable
 from collections.abc import AsyncIterator
 from http.cookies import SimpleCookie
@@ -15,6 +16,7 @@ from fastapi import WebSocket
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from vm_agent_server.src.services.rdp_monitor_service import RdpMonitorService
+from vm_agent_server.src.users.models import UserSession
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,9 @@ class GuacamoleService:
         self._active_streams_lock = threading.Lock()
         self._shutdown_requested = threading.Event()
         self._pending_close_tasks: dict[str, asyncio.Task[None]] = {}
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._recent_close_reasons: dict[str, tuple[float, str]] = {}
+        self._recent_recording_owners: list[dict[str, Any]] = []
 
     @property
     def rdp_monitor(self) -> RdpMonitorService:
@@ -141,113 +146,326 @@ class GuacamoleService:
     def _should_use_websocket_tunnel(self) -> bool:
         return False
 
+    def _forget_http_tunnels_for_auth_token(self, auth_token: str) -> list[str]:
+        released_tunnels = self._rdp_monitor.release_all_tunnels(auth_token)
+        for tunnel_uuid in released_tunnels:
+            self._http_tunnel_tokens.pop(tunnel_uuid, None)
+            self._http_tunnel_cookies.pop(tunnel_uuid, None)
+        return released_tunnels
+
+    def _get_reusable_http_tunnel_uuid(self, auth_token: str) -> str:
+        preferred_tunnel_uuid = self._rdp_monitor.get_primary_tunnel_uuid(auth_token)
+        if preferred_tunnel_uuid and self._http_tunnel_tokens.get(preferred_tunnel_uuid):
+            return preferred_tunnel_uuid
+
+        for tunnel_uuid in reversed(self._rdp_monitor.get_tunnel_uuids(auth_token)):
+            if self._http_tunnel_tokens.get(tunnel_uuid):
+                self._rdp_monitor.touch_tunnel(tunnel_uuid)
+                return tunnel_uuid
+
+        return ""
+
+    def _get_session_lock(self, agent_id: str) -> asyncio.Lock:
+        clean_agent_id = _clean_string(agent_id) or "__default__"
+        existing_lock = self._session_locks.get(clean_agent_id)
+        if existing_lock is not None:
+            return existing_lock
+
+        next_lock = asyncio.Lock()
+        self._session_locks[clean_agent_id] = next_lock
+        return next_lock
+
+    def _build_tracked_owner(self, user_session: UserSession | None) -> dict[str, str] | None:
+        if user_session is None:
+            return None
+
+        user = user_session.user
+        return {
+            "subject": _clean_string(user.subject),
+            "username": _clean_string(user.username),
+            "display_name": _clean_string(user.display_name),
+            "email": _clean_string(user.email),
+            "avatar_url": _clean_string(user.avatar_url),
+            "avatar_initials": _clean_string(user.avatar_initials),
+            "auth_provider": _clean_string(user.auth_provider),
+        }
+
+    def _build_session_lock_key(self, agent_id: str, tracked_owner: dict[str, str] | None) -> str:
+        owner_subject = _clean_string((tracked_owner or {}).get("subject"))
+        if owner_subject:
+            return f"owner:{owner_subject}"
+        clean_agent_id = _clean_string(agent_id)
+        if clean_agent_id:
+            return f"agent:{clean_agent_id}"
+        return "__default__"
+
+    def _remember_close_reason(self, auth_token: str, close_reason: str) -> None:
+        clean_auth_token = _clean_string(auth_token)
+        clean_close_reason = _clean_string(close_reason)
+        if not clean_auth_token or not clean_close_reason:
+            return
+
+        self._recent_close_reasons[clean_auth_token] = (asyncio.get_running_loop().time() + 120.0, clean_close_reason)
+
+    def get_recent_close_reason(self, auth_token: str) -> str:
+        clean_auth_token = _clean_string(auth_token)
+        if not clean_auth_token:
+            return ""
+
+        now = asyncio.get_running_loop().time()
+        for stored_auth_token, (expires_at, _) in list(self._recent_close_reasons.items()):
+            if expires_at <= now:
+                self._recent_close_reasons.pop(stored_auth_token, None)
+
+        stored = self._recent_close_reasons.pop(clean_auth_token, None)
+        if not stored:
+            return ""
+
+        expires_at, close_reason = stored
+        if expires_at <= now:
+            return ""
+        return close_reason
+
+    def _trim_recent_recording_owners(self) -> None:
+        cutoff = time.time() - 86400.0
+        self._recent_recording_owners = [
+            entry
+            for entry in self._recent_recording_owners
+            if float(entry.get("created_at") or 0) >= cutoff
+        ][-512:]
+
+    def _remember_recording_owner(self, recording_entry: dict[str, Any] | None, agent_id: str, tracked_owner: dict[str, str] | None) -> None:
+        if not recording_entry or not tracked_owner:
+            return
+
+        relative_path = _clean_string(recording_entry.get("relative_path"))
+        if not relative_path:
+            return
+
+        self._trim_recent_recording_owners()
+        self._recent_recording_owners.append({
+            "created_at": time.time(),
+            "agent_id": _clean_string(agent_id),
+            "relative_path": relative_path,
+            "relative_stem": relative_path[:-5] if relative_path.casefold().endswith(".guac") else relative_path,
+            "owner": {key: _clean_string(value) for key, value in tracked_owner.items()},
+        })
+
+    def _find_recent_recording_owner(self, relative_path: str) -> dict[str, Any] | None:
+        clean_relative_path = _clean_string(relative_path)
+        if not clean_relative_path:
+            return None
+
+        self._trim_recent_recording_owners()
+        candidate_stem = clean_relative_path[:-5] if clean_relative_path.casefold().endswith(".guac") else clean_relative_path
+        best_match: dict[str, Any] | None = None
+        best_length = -1
+        for entry in self._recent_recording_owners:
+            stored_path = _clean_string(entry.get("relative_path"))
+            stored_stem = _clean_string(entry.get("relative_stem"))
+            if not stored_path and not stored_stem:
+                continue
+            if clean_relative_path == stored_path or candidate_stem == stored_stem or candidate_stem.startswith(f"{stored_stem}."):
+                match_length = len(stored_stem or stored_path)
+                if match_length > best_length:
+                    best_match = entry
+                    best_length = match_length
+        return best_match
+
+    def annotate_recording_inventory(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return payload
+
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
+            return payload
+
+        annotated_entries: list[dict[str, Any]] = []
+        for raw_entry in entries:
+            if not isinstance(raw_entry, dict):
+                continue
+
+            next_entry = dict(raw_entry)
+            owner_match = self._find_recent_recording_owner(_clean_string(next_entry.get("relative_path")))
+            if owner_match is not None:
+                next_entry["owner"] = dict(owner_match.get("owner") or {})
+                next_entry["agent_id"] = _clean_string(owner_match.get("agent_id")) or _clean_string(next_entry.get("agent_id"))
+                owner_payload = next_entry.get("owner") if isinstance(next_entry.get("owner"), dict) else {}
+                next_entry["username"] = _clean_string(owner_payload.get("username")) or _clean_string(next_entry.get("username"))
+            annotated_entries.append(next_entry)
+
+        return {
+            **payload,
+            "entries": annotated_entries,
+        }
+
     async def create_client_session(
         self,
         agent_id: str,
         state: dict[str, Any] | None,
         public_base_url: str,
         *,
+        user_session: UserSession | None = None,
         force_fresh: bool = False,
         refresh_tunnel: bool = False,
+        connection_id: str = "",
+        vm_username: str = "",
+        read_only: bool = False,
+        recorded: bool = False,
     ) -> dict[str, Any]:
-        base_session = self._build_guacamole_session(agent_id, state)
-        proxy_tunnels = self._build_proxy_tunnel_urls(public_base_url)
-        if not self._should_use_websocket_tunnel() or self._websocket_proxy_supported is False:
-            proxy_tunnels["websocket"] = ""
+        tracked_owner = self._build_tracked_owner(user_session)
+        lock_key = self._build_session_lock_key(agent_id, tracked_owner)
 
-        existing = self._rdp_monitor.get_session_for_agent(agent_id)
-        if existing is not None and force_fresh:
-            self.cancel_scheduled_session_close(existing.auth_token)
-            logger.info(
-                "Refreshing Guacamole session for agent=%s auth=%s connection=%s",
-                agent_id,
-                _format_token_marker(existing.auth_token),
-                existing.connection_id or "<none>",
-            )
-            base_url = self._get_guacamole_base_url()
-            try:
-                if base_url:
-                    await asyncio.to_thread(self._invalidate_guacamole_token, base_url, existing.auth_token)
-            except Exception as error:
-                logger.warning("Failed to invalidate Guacamole session %s before refresh: %s", existing.auth_token, error)
-            await self._forget_session(existing.auth_token, close_reason="Session refreshed")
-            existing = None
+        async with self._get_session_lock(lock_key):
+            base_session = self._build_guacamole_session(agent_id, state)
+            proxy_tunnels = self._build_proxy_tunnel_urls(public_base_url)
+            if not self._should_use_websocket_tunnel() or self._websocket_proxy_supported is False:
+                proxy_tunnels["websocket"] = ""
 
-        if existing is not None:
-            self.cancel_scheduled_session_close(existing.auth_token)
-            self._rdp_monitor.touch_auth_token(existing.auth_token)
-            resume_tunnel_uuid = ""
-            if refresh_tunnel:
-                resume_tunnel_uuid = await asyncio.to_thread(
-                    self._open_http_tunnel,
-                    existing.auth_token,
-                    existing.data_source,
-                    existing.connection_id,
-                    base_session.get("display") if isinstance(base_session.get("display"), dict) else {},
+            requested_connection_id = _clean_string(connection_id)
+            requested_username = _clean_string(vm_username) or _clean_string((base_session.get("resolved_fields") or {}).get("guacamole_username"))
+            owner_subject = _clean_string((tracked_owner or {}).get("subject"))
+
+            existing = self._rdp_monitor.get_session_for_owner(owner_subject) if owner_subject else self._rdp_monitor.get_session_for_agent(agent_id)
+            if existing is not None and refresh_tunnel:
+                force_fresh = True
+            if existing is not None and recorded:
+                force_fresh = True
+            if existing is not None and existing.agent_id != agent_id:
+                force_fresh = True
+            if existing is not None and requested_connection_id and requested_connection_id != existing.connection_id:
+                force_fresh = True
+            if existing is not None and force_fresh:
+                self.cancel_scheduled_session_close(existing.auth_token)
+                logger.info(
+                    "Refreshing Guacamole session for owner=%s agent=%s auth=%s connection=%s refresh_tunnel=%s",
+                    owner_subject or "<anonymous>",
+                    agent_id,
+                    _format_token_marker(existing.auth_token),
+                    existing.connection_id or "<none>",
+                    refresh_tunnel,
                 )
-            if not resume_tunnel_uuid:
-                resume_tunnel_uuid = self._rdp_monitor.get_primary_tunnel_uuid(existing.auth_token)
-            if not resume_tunnel_uuid:
-                resume_tunnel_uuid = await asyncio.to_thread(
-                    self._open_http_tunnel,
-                    existing.auth_token,
-                    existing.data_source,
-                    existing.connection_id,
-                    base_session.get("display") if isinstance(base_session.get("display"), dict) else {},
+                base_url = self._get_guacamole_base_url()
+                try:
+                    if base_url:
+                        await asyncio.to_thread(self._invalidate_guacamole_token, base_url, existing.auth_token)
+                except Exception as error:
+                    logger.warning("Failed to invalidate Guacamole session %s before refresh: %s", existing.auth_token, error)
+                await self._forget_session(existing.auth_token, close_reason="Session refreshed")
+                existing = None
+
+            if existing is not None:
+                self.cancel_scheduled_session_close(existing.auth_token)
+                self._rdp_monitor.register_session(
+                    agent_id=agent_id,
+                    auth_token=existing.auth_token,
+                    connection_id=existing.connection_id,
+                    data_source=existing.data_source,
+                    username=requested_username or existing.username,
+                    owner=tracked_owner,
                 )
-            logger.info(
-                "Reusing Guacamole session for agent=%s auth=%s connection=%s resume_tunnel=%s",
-                agent_id,
-                _format_token_marker(existing.auth_token),
-                existing.connection_id or "<none>",
-                resume_tunnel_uuid or "<none>",
-            )
-            return {
-                **base_session,
-                "status": "ready",
-                "tunnels": proxy_tunnels,
-                "client_session": {
-                    "auth_token": existing.auth_token,
-                    "data_source": existing.data_source,
-                    "connection_id": existing.connection_id,
-                    "connection_type": "c",
-                    "display": (base_session.get("display") or {"mode": "dynamic", "dpi": 96}),
+                resume_tunnel_uuid = ""
+                if refresh_tunnel:
+                    released_tunnels = self._forget_http_tunnels_for_auth_token(existing.auth_token)
+                    if released_tunnels:
+                        logger.info(
+                            "Dropped stale Guacamole tunnel(s) for agent=%s auth=%s tunnels=%s",
+                            agent_id,
+                            _format_token_marker(existing.auth_token),
+                            ",".join(released_tunnels),
+                        )
+                    resume_tunnel_uuid = await asyncio.to_thread(
+                        self._open_http_tunnel,
+                        existing.auth_token,
+                        existing.data_source,
+                        existing.connection_id,
+                        base_session.get("display") if isinstance(base_session.get("display"), dict) else {},
+                    )
+                if not resume_tunnel_uuid:
+                    resume_tunnel_uuid = self._get_reusable_http_tunnel_uuid(existing.auth_token)
+                if not resume_tunnel_uuid:
+                    resume_tunnel_uuid = await asyncio.to_thread(
+                        self._open_http_tunnel,
+                        existing.auth_token,
+                        existing.data_source,
+                        existing.connection_id,
+                        base_session.get("display") if isinstance(base_session.get("display"), dict) else {},
+                    )
+                logger.info(
+                    "Reusing Guacamole session for owner=%s agent=%s auth=%s connection=%s resume_tunnel=%s",
+                    owner_subject or "<anonymous>",
+                    agent_id,
+                    _format_token_marker(existing.auth_token),
+                    existing.connection_id or "<none>",
+                    resume_tunnel_uuid or "<none>",
+                )
+                return {
+                    **base_session,
+                    "status": "ready",
+                    "read_only": read_only,
                     "tunnels": proxy_tunnels,
-                    "resume_tunnel_uuid": resume_tunnel_uuid,
-                },
-            }
+                    "client_session": {
+                        "auth_token": existing.auth_token,
+                        "data_source": existing.data_source,
+                        "connection_id": existing.connection_id,
+                        "connection_type": "c",
+                        "display": (base_session.get("display") or {"mode": "dynamic", "dpi": 96}),
+                        "tunnels": proxy_tunnels,
+                        "resume_tunnel_uuid": resume_tunnel_uuid,
+                    },
+                }
 
-        logger.info("Creating new Guacamole session for agent=%s force_fresh=%s", agent_id, force_fresh)
-        session = await asyncio.to_thread(self._create_guacamole_client_session, agent_id, state, proxy_tunnels)
-        next_client_session = session.get("client_session") if isinstance(session.get("client_session"), dict) else {}
-        auth_token = _clean_string(next_client_session.get("auth_token"))
-        if auth_token:
-            self._agent_tokens.setdefault(agent_id, set()).add(auth_token)
-            self._rdp_monitor.register_session(
-                agent_id=agent_id,
-                auth_token=auth_token,
-                connection_id=_clean_string(next_client_session.get("connection_id")),
-                data_source=_clean_string(next_client_session.get("data_source")),
-            )
-            resume_tunnel_uuid = await asyncio.to_thread(
-                self._open_http_tunnel,
-                auth_token,
-                _clean_string(next_client_session.get("data_source")),
-                _clean_string(next_client_session.get("connection_id")),
-                next_client_session.get("display") if isinstance(next_client_session.get("display"), dict) else {},
-            )
-            if resume_tunnel_uuid:
-                next_client_session["resume_tunnel_uuid"] = resume_tunnel_uuid
             logger.info(
-                "Created Guacamole session for agent=%s auth=%s connection=%s resume_tunnel=%s",
+                "Creating new Guacamole session for owner=%s agent=%s force_fresh=%s",
+                owner_subject or "<anonymous>",
                 agent_id,
-                _format_token_marker(auth_token),
-                _clean_string(next_client_session.get("connection_id")) or "<none>",
-                resume_tunnel_uuid or "<none>",
+                force_fresh,
             )
-        else:
-            logger.warning("Guacamole session creation for agent=%s returned no auth token", agent_id)
-        return session
+            session = await asyncio.to_thread(
+                self._create_guacamole_client_session,
+                agent_id,
+                state,
+                proxy_tunnels,
+                connection_id=requested_connection_id,
+                vm_username=vm_username,
+                recording_owner=tracked_owner,
+                recorded=recorded,
+            )
+            next_client_session = session.get("client_session") if isinstance(session.get("client_session"), dict) else {}
+            recording_entry = session.get("recording_entry") if isinstance(session.get("recording_entry"), dict) else None
+            auth_token = _clean_string(next_client_session.get("auth_token"))
+            if auth_token:
+                self._agent_tokens.setdefault(agent_id, set()).add(auth_token)
+                self._rdp_monitor.register_session(
+                    agent_id=agent_id,
+                    auth_token=auth_token,
+                    connection_id=_clean_string(next_client_session.get("connection_id")),
+                    data_source=_clean_string(next_client_session.get("data_source")),
+                    username=requested_username,
+                    owner=tracked_owner,
+                )
+                self._remember_recording_owner(recording_entry, agent_id, tracked_owner)
+                resume_tunnel_uuid = await asyncio.to_thread(
+                    self._open_http_tunnel,
+                    auth_token,
+                    _clean_string(next_client_session.get("data_source")),
+                    _clean_string(next_client_session.get("connection_id")),
+                    next_client_session.get("display") if isinstance(next_client_session.get("display"), dict) else {},
+                )
+                if resume_tunnel_uuid:
+                    next_client_session["resume_tunnel_uuid"] = resume_tunnel_uuid
+                logger.info(
+                    "Created Guacamole session for owner=%s agent=%s auth=%s connection=%s resume_tunnel=%s",
+                    owner_subject or "<anonymous>",
+                    agent_id,
+                    _format_token_marker(auth_token),
+                    _clean_string(next_client_session.get("connection_id")) or "<none>",
+                    resume_tunnel_uuid or "<none>",
+                )
+            else:
+                logger.warning("Guacamole session creation for agent=%s returned no auth token", agent_id)
+            session["read_only"] = read_only
+            return session
 
     async def revoke_client_session(self, auth_token: str) -> bool:
         self.cancel_scheduled_session_close(auth_token)
@@ -302,6 +520,26 @@ class GuacamoleService:
             await self._forget_session(auth_token, close_reason=close_reason)
             closed_count += 1
         return closed_count
+
+    async def close_agent_owner_session(self, agent_id: str, owner_subject: str, *, close_reason: str) -> bool:
+        clean_agent_id = _clean_string(agent_id)
+        clean_owner_subject = _clean_string(owner_subject)
+        if not clean_agent_id or not clean_owner_subject:
+            return False
+
+        tracked_session = next(
+            (
+                session
+                for session in self._rdp_monitor.get_sessions_for_agent(clean_agent_id)
+                if _clean_string((session.owner or {}).get("subject")) == clean_owner_subject
+            ),
+            None,
+        )
+        if tracked_session is None:
+            return False
+
+        closed_count = await self.close_tracked_sessions([tracked_session.auth_token], close_reason=close_reason)
+        return closed_count > 0
 
     async def close_all_sessions(self) -> int:
         self._shutdown_requested.set()
@@ -560,6 +798,8 @@ class GuacamoleService:
         clean_auth_token = _clean_string(auth_token)
         if not clean_auth_token:
             return
+
+        self._remember_close_reason(clean_auth_token, close_reason)
 
         tracked_session = self._rdp_monitor.remove_session(clean_auth_token)
         if tracked_session is not None:

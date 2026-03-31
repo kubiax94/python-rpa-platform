@@ -34,6 +34,31 @@ class IdentitySettingsPatchRequest(ApiRequestModel):
     azure: AzureSsoPatchRequest | None = None
 
 
+class GuacamoleRecordingSettingsPatchRequest(ApiRequestModel):
+    enabled: bool | None = None
+    browse_url: str | None = None
+    path_template: str | None = None
+    name_template: str | None = None
+    create_path: bool | None = None
+    exclude_output: bool | None = None
+    exclude_mouse: bool | None = None
+    exclude_touch: bool | None = None
+    include_keys: bool | None = None
+
+
+class GuacamoleDisplaySettingsPatchRequest(ApiRequestModel):
+    mode: str | None = Field(default=None, pattern="^(dynamic|fixed)$")
+    width: int | None = Field(default=None, ge=1, le=16384)
+    height: int | None = Field(default=None, ge=1, le=16384)
+    dpi: int | None = Field(default=None, ge=1, le=1000)
+
+
+class GuacamoleSettingsPatchRequest(ApiRequestModel):
+    display: GuacamoleDisplaySettingsPatchRequest | None = None
+    recording: GuacamoleRecordingSettingsPatchRequest | None = None
+
+
 class UpdateServerSettingsRequest(ApiRequestModel):
     deployment: DeploymentDefaultsPatchRequest | None = None
     identity: IdentitySettingsPatchRequest | None = None
+    guacamole: GuacamoleSettingsPatchRequest | None = None

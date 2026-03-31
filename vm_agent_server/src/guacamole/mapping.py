@@ -68,7 +68,7 @@ def build_agent_guacamole_mapping(
     }
 
     rendered_group_name = _render_template(
-        _clean_string(os.getenv("GUACAMOLE_AGENT_GROUP_TEMPLATE")) or "{username}",
+        _clean_string(os.getenv("GUACAMOLE_AGENT_GROUP_TEMPLATE")) or "{display_name}",
         values,
     )
     rendered_connection_name = _render_template(

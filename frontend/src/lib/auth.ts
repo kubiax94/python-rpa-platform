@@ -3,6 +3,7 @@
 const AUTH_SESSION_STORAGE_KEY = "my-orciestra.auth-session";
 const AUTH_ACCESS_TOKEN_STORAGE_KEY = "my-orciestra.auth-access-token";
 export const AUTH_SESSION_INVALID_EVENT = "my-orciestra:auth-session-invalid";
+export const AUTH_SESSION_CHANGED_EVENT = "my-orciestra:auth-session-changed";
 
 const CONFIGURED_API_BASE = (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/$/, "");
 
@@ -33,6 +34,8 @@ export interface AuthUser {
   username: string;
   display_name: string;
   email: string;
+  avatar_url: string;
+  avatar_initials: string;
   auth_provider: string;
   roles: string[];
   group_ids: string[];
@@ -72,12 +75,49 @@ function canUseStorage(): boolean {
   return typeof window !== "undefined" && typeof window.sessionStorage !== "undefined";
 }
 
+function canUsePersistentStorage(): boolean {
+  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+}
+
+function loadStoredValue(key: string): string {
+  if (canUsePersistentStorage()) {
+    const persistent = window.localStorage.getItem(key);
+    if (persistent) {
+      return persistent;
+    }
+  }
+
+  if (canUseStorage()) {
+    return window.sessionStorage.getItem(key) || "";
+  }
+
+  return "";
+}
+
+function saveStoredValue(key: string, value: string): void {
+  if (canUsePersistentStorage()) {
+    window.localStorage.setItem(key, value);
+  }
+  if (canUseStorage()) {
+    window.sessionStorage.setItem(key, value);
+  }
+}
+
+function clearStoredValue(key: string): void {
+  if (canUsePersistentStorage()) {
+    window.localStorage.removeItem(key);
+  }
+  if (canUseStorage()) {
+    window.sessionStorage.removeItem(key);
+  }
+}
+
 export function loadAuthSession(): AuthSession | null {
-  if (!canUseStorage()) {
+  if (!canUseStorage() && !canUsePersistentStorage()) {
     return null;
   }
 
-  const raw = window.sessionStorage.getItem(AUTH_SESSION_STORAGE_KEY);
+  const raw = loadStoredValue(AUTH_SESSION_STORAGE_KEY);
   if (!raw) {
     return null;
   }
@@ -94,26 +134,28 @@ export function loadAuthSession(): AuthSession | null {
 }
 
 export function saveAuthSession(session: AuthSession): void {
-  if (!canUseStorage()) {
+  if (!canUseStorage() && !canUsePersistentStorage()) {
     return;
   }
-  window.sessionStorage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(session));
-  window.sessionStorage.setItem(AUTH_ACCESS_TOKEN_STORAGE_KEY, session.access_token);
+  saveStoredValue(AUTH_SESSION_STORAGE_KEY, JSON.stringify(session));
+  saveStoredValue(AUTH_ACCESS_TOKEN_STORAGE_KEY, session.access_token);
+  dispatchAuthSessionChanged();
 }
 
 export function saveAccessToken(accessToken: string): void {
-  if (!canUseStorage()) {
+  if (!canUseStorage() && !canUsePersistentStorage()) {
     return;
   }
-  window.sessionStorage.setItem(AUTH_ACCESS_TOKEN_STORAGE_KEY, accessToken);
+  saveStoredValue(AUTH_ACCESS_TOKEN_STORAGE_KEY, accessToken);
 }
 
 export function clearAuthSession(): void {
-  if (!canUseStorage()) {
+  if (!canUseStorage() && !canUsePersistentStorage()) {
     return;
   }
-  window.sessionStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
-  window.sessionStorage.removeItem(AUTH_ACCESS_TOKEN_STORAGE_KEY);
+  clearStoredValue(AUTH_SESSION_STORAGE_KEY);
+  clearStoredValue(AUTH_ACCESS_TOKEN_STORAGE_KEY);
+  dispatchAuthSessionChanged();
 }
 
 function dispatchAuthSessionInvalid(detail?: { reason?: string; status?: number }): void {
@@ -123,11 +165,18 @@ function dispatchAuthSessionInvalid(detail?: { reason?: string; status?: number 
   window.dispatchEvent(new CustomEvent(AUTH_SESSION_INVALID_EVENT, { detail }));
 }
 
+function dispatchAuthSessionChanged(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent(AUTH_SESSION_CHANGED_EVENT));
+}
+
 export function getAccessToken(): string {
-  if (!canUseStorage()) {
+  if (!canUseStorage() && !canUsePersistentStorage()) {
     return "";
   }
-  return window.sessionStorage.getItem(AUTH_ACCESS_TOKEN_STORAGE_KEY) || loadAuthSession()?.access_token || "";
+  return loadStoredValue(AUTH_ACCESS_TOKEN_STORAGE_KEY) || loadAuthSession()?.access_token || "";
 }
 
 export function consumeAuthTokenFromUrlHash(): string {

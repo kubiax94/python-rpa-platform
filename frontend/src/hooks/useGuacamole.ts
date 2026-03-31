@@ -25,6 +25,18 @@ export interface GuacamoleConfig {
   auth_password_configured: boolean;
   auth_provider: string;
   connection_type: string;
+  recording?: {
+    enabled: boolean;
+    configured: boolean;
+    create_path: boolean;
+    browse_url?: string;
+    path_template?: string;
+    name_template?: string;
+    exclude_output?: boolean;
+    exclude_mouse?: boolean;
+    exclude_touch?: boolean;
+    include_keys?: boolean;
+  };
   websocket_tunnel_url?: string;
   http_tunnel_url?: string;
   notes: string[];
@@ -34,6 +46,7 @@ export interface GuacamoleSession {
   enabled: boolean;
   configured: boolean;
   status: "ready" | "needs_configuration" | "auth_failed";
+  read_only?: boolean;
   agent_id: string;
   source: string;
   connection_id?: string;
@@ -43,6 +56,18 @@ export interface GuacamoleSession {
   display: GuacamoleDisplayProfile;
   allow_embed: boolean;
   connection_type: string;
+  recording?: {
+    enabled: boolean;
+    configured: boolean;
+    create_path: boolean;
+    browse_url?: string;
+    path_template?: string;
+    name_template?: string;
+    exclude_output?: boolean;
+    exclude_mouse?: boolean;
+    exclude_touch?: boolean;
+    include_keys?: boolean;
+  };
   resolved_fields: {
     hostname?: string;
     guacamole_target_host?: string;
@@ -122,6 +147,15 @@ export interface GuacamoleTrackedSessionSummary {
   agent_id: string;
   connection_id: string;
   data_source: string;
+  owner?: {
+    subject: string;
+    username: string;
+    display_name: string;
+    email: string;
+    avatar_url: string;
+    avatar_initials: string;
+    auth_provider: string;
+  } | null;
   created_at: number;
   last_activity_at: number;
   idle_seconds: number;
@@ -134,9 +168,100 @@ export interface GuacamoleTrackedSessionsResponse {
   sessions: GuacamoleTrackedSessionSummary[];
 }
 
+export interface GuacamoleRecordingEntry {
+  agent_id: string;
+  username: string;
+  owner?: {
+    subject: string;
+    username: string;
+    display_name: string;
+    email: string;
+    avatar_url: string;
+    avatar_initials: string;
+    auth_provider: string;
+  } | null;
+  name: string;
+  relative_path: string;
+  size_bytes?: number | null;
+  modified_at?: number | null;
+  download_url: string;
+}
+
+export interface GuacamoleRecordingsResponse {
+  enabled: boolean;
+  configured: boolean;
+  browse_url?: string;
+  entry_count: number;
+  entries: GuacamoleRecordingEntry[];
+  warnings: string[];
+}
+
+export interface GuacamoleVmUserSession {
+  session_key: string;
+  session_id: number;
+  session_name: string;
+  username: string;
+  status: string;
+  type: string;
+  process_count: number;
+  is_preferred: boolean;
+  is_active: boolean;
+  is_in_use: boolean;
+  in_use_by?: {
+    subject: string;
+    username: string;
+    display_name: string;
+    email: string;
+    avatar_url: string;
+    avatar_initials: string;
+    auth_provider: string;
+  } | null;
+  in_use_by_users?: Array<{
+    subject: string;
+    username: string;
+    display_name: string;
+    email: string;
+    avatar_url: string;
+    avatar_initials: string;
+    auth_provider: string;
+  }>;
+  identity?: {
+    subject: string;
+    username: string;
+    display_name: string;
+    email: string;
+    avatar_url: string;
+    avatar_initials: string;
+    auth_provider: string;
+  } | null;
+  guacamole: {
+    group_identifier: string;
+    group_name: string;
+    connection_id: string;
+    connection_name: string;
+  };
+}
+
+export interface GuacamoleVmUserSessionsResponse {
+  agent_id: string;
+  sessions: GuacamoleVmUserSession[];
+}
+
 export interface GuacamoleKillTrackedSessionsResponse {
   ok: boolean;
   closed_count: number;
+}
+
+export interface GuacamoleSessionStatusResponse {
+  active: boolean;
+  close_reason: string;
+}
+
+export interface GuacamoleKickOwnerSessionResponse {
+  ok: boolean;
+  revoked?: boolean | null;
+  detail?: string | null;
+  error?: string | null;
 }
 
 export async function fetchGuacamoleConfig(): Promise<GuacamoleConfig> {
@@ -147,9 +272,13 @@ export async function fetchGuacamoleSession(agentId: string): Promise<GuacamoleS
   return fetchJSON<GuacamoleSession>(`${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole`);
 }
 
+export async function fetchGuacamoleVmUserSessions(agentId: string): Promise<GuacamoleVmUserSessionsResponse> {
+  return fetchJSON<GuacamoleVmUserSessionsResponse>(`${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole/user-sessions`);
+}
+
 export async function createGuacamoleClientSession(
   agentId: string,
-  options?: { forceFresh?: boolean; refreshTunnel?: boolean },
+  options?: { forceFresh?: boolean; refreshTunnel?: boolean; connectionId?: string; vmUsername?: string; readOnly?: boolean; recorded?: boolean },
 ): Promise<GuacamoleClientSession> {
   const params = new URLSearchParams();
   if (options?.forceFresh) {
@@ -157,6 +286,18 @@ export async function createGuacamoleClientSession(
   }
   if (options?.refreshTunnel) {
     params.set("refresh_tunnel", "true");
+  }
+  if (options?.connectionId) {
+    params.set("connection_id", options.connectionId);
+  }
+  if (options?.vmUsername) {
+    params.set("vm_username", options.vmUsername);
+  }
+  if (options?.readOnly) {
+    params.set("read_only", "true");
+  }
+  if (options?.recorded) {
+    params.set("recorded", "true");
   }
   const query = params.size > 0 ? `?${params.toString()}` : "";
   return fetchJSON<GuacamoleClientSession>(
@@ -177,10 +318,33 @@ export async function fetchGuacamoleTrackedSessions(): Promise<GuacamoleTrackedS
   return fetchJSON<GuacamoleTrackedSessionsResponse>(`${API_BASE}/api/guacamole/tracked-sessions`);
 }
 
+export async function fetchGuacamoleRecordings(options?: { agentId?: string; username?: string }): Promise<GuacamoleRecordingsResponse> {
+  const params = new URLSearchParams();
+  if (options?.agentId) {
+    params.set("agent_id", options.agentId);
+  }
+  if (options?.username) {
+    params.set("username", options.username);
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  return fetchJSON<GuacamoleRecordingsResponse>(`${API_BASE}/api/guacamole/recordings${query}`);
+}
+
 export async function killAllTrackedGuacamoleSessions(): Promise<GuacamoleKillTrackedSessionsResponse> {
   return fetchJSON<GuacamoleKillTrackedSessionsResponse>(`${API_BASE}/api/guacamole/tracked-sessions/kill-all`, {
     method: "POST",
   });
+}
+
+export async function kickGuacamoleOwnerSession(agentId: string, ownerSubject: string): Promise<GuacamoleKickOwnerSessionResponse> {
+  return fetchJSON<GuacamoleKickOwnerSessionResponse>(
+    `${API_BASE}/api/agents/${encodeURIComponent(agentId)}/guacamole/tracked-sessions/${encodeURIComponent(ownerSubject)}/kick`,
+    { method: "POST" },
+  );
+}
+
+export async function fetchGuacamoleSessionStatus(authToken: string): Promise<GuacamoleSessionStatusResponse> {
+  return fetchJSON<GuacamoleSessionStatusResponse>(`${API_BASE}/api/guacamole/session/${encodeURIComponent(authToken)}/status`);
 }
 
 export async function revokeGuacamoleClientSession(authToken: string, options?: { keepalive?: boolean }): Promise<void> {
@@ -253,14 +417,14 @@ export function useGuacamoleSession(agentId: string | null) {
     }
   }, [agentId]);
 
-  const createClientSession = useCallback(async () => {
+  const createClientSession = useCallback(async (options?: { forceFresh?: boolean; refreshTunnel?: boolean; connectionId?: string; vmUsername?: string; readOnly?: boolean; recorded?: boolean }) => {
     if (!agentId) {
       return null;
     }
 
     setSessionLoading(true);
     try {
-      const nextData = await createGuacamoleClientSession(agentId);
+      const nextData = await createGuacamoleClientSession(agentId, options);
       setData(nextData);
       return nextData;
     } catch (error) {
@@ -334,4 +498,69 @@ export function useGuacamoleTrackedSessions() {
   }, [refresh]);
 
   return { data, loading, refresh, setData };
+}
+
+export function useGuacamoleRecordings(options?: { agentId?: string; username?: string }) {
+  const [data, setData] = useState<GuacamoleRecordingsResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const agentId = options?.agentId ?? "";
+  const username = options?.username ?? "";
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      setData(await fetchGuacamoleRecordings({ agentId, username }));
+    } catch (error) {
+      console.error("[useGuacamoleRecordings] Error:", error);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [agentId, username]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { data, loading, refresh, setData };
+}
+
+export function useGuacamoleVmUserSessions(agentId: string | null) {
+  const [data, setData] = useState<GuacamoleVmUserSessionsResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!agentId) {
+      setData(null);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      setData(await fetchGuacamoleVmUserSessions(agentId));
+    } catch (error) {
+      console.error("[useGuacamoleVmUserSessions] Error:", error);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [agentId]);
+
+  useEffect(() => {
+    if (!agentId) {
+      setData(null);
+      return;
+    }
+
+    void refresh();
+    const intervalId = window.setInterval(() => {
+      void refresh();
+    }, 5000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [agentId, refresh]);
+
+  return { data, loading, refresh };
 }

@@ -62,6 +62,27 @@ def _truncate_message(value: str, limit: int = 500) -> str:
     return f"{cleaned[:limit - 3]}..."
 
 
+def _build_avatar_initials(*values: str) -> str:
+    tokens: list[str] = []
+    for value in values:
+        cleaned = _clean(value)
+        if not cleaned:
+            continue
+        if "@" in cleaned:
+            cleaned = cleaned.split("@", 1)[0]
+        cleaned = cleaned.replace("\\", " ").replace(".", " ").replace("_", " ").replace("-", " ")
+        candidate_tokens = [part for part in cleaned.split() if part]
+        if candidate_tokens:
+            tokens = candidate_tokens
+            break
+
+    if not tokens:
+        return "U"
+    if len(tokens) == 1:
+        return tokens[0][:2].upper()
+    return f"{tokens[0][0]}{tokens[1][0]}".upper()
+
+
 def _read_error_payload(error: HTTPError) -> dict[str, object]:
     try:
         raw_payload = error.read()
@@ -229,6 +250,7 @@ class UserService:
             subject=f"local:{expected_username}",
             username=expected_username,
             display_name="Local Admin",
+            avatar_initials=_build_avatar_initials("Local Admin", expected_username),
             auth_provider="local_bootstrap",
             roles=["admin"],
             claims={},
@@ -263,6 +285,18 @@ class UserService:
         if not access_token:
             return
         self._sessions.pop(access_token, None)
+
+    def list_active_identities(self) -> list[UserIdentity]:
+        self._purge_expired_sessions()
+        identities: list[UserIdentity] = []
+        seen_subjects: set[str] = set()
+        for session in self._sessions.values():
+            subject = _clean(session.user.subject)
+            if not subject or subject in seen_subjects:
+                continue
+            seen_subjects.add(subject)
+            identities.append(session.user)
+        return identities
 
     def begin_microsoft_login(self, identity: IdentitySettings, public_base_url: str, return_to: str) -> str:
         metadata = self._get_oidc_metadata(identity)
@@ -347,6 +381,7 @@ class UserService:
         username = _clean(str(claims.get("preferred_username") or claims.get("email") or claims.get("upn") or subject))
         display_name = _clean(str(claims.get("name") or username))
         email = _clean(str(claims.get("email") or claims.get("preferred_username") or ""))
+        avatar_url = _clean(str(claims.get("picture") or ""))
         group_ids = [str(item).strip() for item in (claims.get("groups") or []) if str(item).strip()] if isinstance(claims.get("groups"), list) else []
         role_names = [str(item).strip() for item in (claims.get("roles") or []) if str(item).strip()] if isinstance(claims.get("roles"), list) else []
 
@@ -366,6 +401,8 @@ class UserService:
             username=username,
             display_name=display_name,
             email=email,
+            avatar_url=avatar_url,
+            avatar_initials=_build_avatar_initials(display_name, username, email),
             auth_provider="azure_entra",
             roles=[effective_role],
             group_ids=group_ids,
@@ -374,6 +411,9 @@ class UserService:
                 "oid": claims.get("oid"),
                 "tid": claims.get("tid"),
                 "preferred_username": claims.get("preferred_username"),
+                "upn": claims.get("upn"),
+                "email": claims.get("email"),
+                "picture": claims.get("picture"),
                 "roles": role_names,
                 "has_groups_overage": bool(claims.get("_claim_names") or claims.get("hasgroups")),
             },

@@ -9,6 +9,7 @@ declare module "guacamole-common-js" {
     getWidth(): number;
     getHeight(): number;
     scale(scale: number): void;
+    showCursor(shown: boolean): void;
     onresize?: ((width: number, height: number) => void) | null;
   }
 
@@ -100,6 +101,26 @@ declare module "guacamole-common-js" {
     Mouse: GuacamoleMouseConstructor;
     Keyboard: new (target: Document | HTMLElement) => GuacamoleKeyboard;
     StringWriter: new (stream: GuacamoleOutputStream) => GuacamoleStringWriter;
+    SessionRecording: new (recordingBlob: Blob | GuacamoleTunnel) => {
+      onload?: (() => void) | null;
+      onerror?: ((message: string) => void) | null;
+      onabort?: (() => void) | null;
+      onprogress?: ((duration: number, currentSize: number) => void) | null;
+      onplay?: (() => void) | null;
+      onpause?: (() => void) | null;
+      onseek?: ((position: number, currentFrame: number, targetFrame: number) => void) | null;
+      connect(data?: string): void;
+      disconnect(): void;
+      abort(): void;
+      cancel(): void;
+      getDisplay(): GuacamoleDisplay;
+      isPlaying(): boolean;
+      getPosition(): number;
+      getDuration(): number;
+      play(): void;
+      pause(): void;
+      seek(position: number, callback?: () => void): void;
+    };
   }
 
   const Guacamole: GuacamoleNamespace;

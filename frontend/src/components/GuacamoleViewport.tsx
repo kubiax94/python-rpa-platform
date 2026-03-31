@@ -5,6 +5,7 @@ import Guacamole from "guacamole-common-js";
 import {
   closeGuacamoleClientSessionOnPageUnload,
   createGuacamoleClientSession,
+  fetchGuacamoleSessionStatus,
   fetchGuacamoleDiagnostics,
   revokeGuacamoleClientSession,
   type GuacamoleClientSession,
@@ -31,6 +32,8 @@ type RequiredPromptState = {
   submitting: boolean;
   error: string | null;
 };
+
+const pendingViewportCleanupByInstanceId = new Map<string, number>();
 
 export function GuacamoleViewport({
   session,
@@ -59,6 +62,10 @@ export function GuacamoleViewport({
   const pageUnloadingRef = useRef(false);
   const sendResizeRef = useRef<() => void>(() => undefined);
   const forceFreshOnNextConnectRef = useRef(false);
+  const refreshTunnelOnNextConnectRef = useRef(false);
+  const connectInFlightRef = useRef(false);
+  const handledClosureAuthTokenRef = useRef<string | null>(null);
+  const hydratedPersistedSessionRef = useRef(Boolean(session.clientSession));
   const keyboardCaptureEnabledRef = useRef(false);
   const keyboardRef = useRef<InstanceType<typeof Guacamole.Keyboard> | null>(null);
   const clientRef = useRef<InstanceType<typeof Guacamole.Client> | null>(null);
@@ -88,6 +95,17 @@ export function GuacamoleViewport({
       ...details,
     });
   }, []);
+
+  useEffect(() => {
+    const pendingCleanupId = pendingViewportCleanupByInstanceId.get(session.instanceId);
+    if (pendingCleanupId != null) {
+      window.clearTimeout(pendingCleanupId);
+      pendingViewportCleanupByInstanceId.delete(session.instanceId);
+      debugLog("cancel-pending-cleanup", {
+        instanceId: session.instanceId,
+      });
+    }
+  }, [debugLog, session.instanceId]);
 
   useEffect(() => {
     activeRef.current = active;
@@ -126,9 +144,33 @@ export function GuacamoleViewport({
     const display = client.getDisplay();
     const displayWidth = display.getWidth();
     const displayHeight = display.getHeight();
+    const displayElement = display.getElement() as HTMLElement;
     if (!displayWidth || !displayHeight || !host.clientWidth || !host.clientHeight) {
       return;
     }
+
+    if (session.fullscreen && session.clientSession?.display?.mode === "fixed") {
+      const scale = Math.max(
+        host.clientWidth / displayWidth,
+        host.clientHeight / displayHeight,
+        0.1,
+      );
+      const scaledWidth = displayWidth * scale;
+      const scaledHeight = displayHeight * scale;
+      displayElement.style.left = `${Math.round((host.clientWidth - scaledWidth) / 2)}px`;
+      displayElement.style.top = `${Math.round((host.clientHeight - scaledHeight) / 2)}px`;
+      displayElement.style.right = "auto";
+      displayElement.style.bottom = "auto";
+      displayElement.style.transform = "";
+      display.scale(scale);
+      return;
+    }
+
+    displayElement.style.left = "auto";
+    displayElement.style.top = "auto";
+    displayElement.style.right = "0";
+    displayElement.style.bottom = "0";
+    displayElement.style.transform = "";
 
     const scale = Math.max(
       Math.min(host.clientWidth / displayWidth, host.clientHeight / displayHeight),
@@ -198,7 +240,7 @@ export function GuacamoleViewport({
         clientSession: persistedClientSession,
       });
       if (authToken) {
-        closeGuacamoleClientSessionOnPageUnload(authToken);
+        closeGuacamoleClientSessionOnPageUnload(authToken, 20);
       }
       authTokenRef.current = null;
       resumeTunnelUuidRef.current = null;
@@ -263,6 +305,7 @@ export function GuacamoleViewport({
       authToken: maskDebugValue(authTokenRef.current),
     });
     connectGenerationRef.current += 1;
+    connectInFlightRef.current = false;
     hasConnectedRef.current = false;
     clientStateRef.current = Guacamole.Client.State.IDLE;
     setKeyboardCaptureEnabled(false, "disconnect");
@@ -367,6 +410,49 @@ export function GuacamoleViewport({
     }
   });
 
+  const resolveCloseReason = useEffectEvent(async (authToken: string | null) => {
+    if (!authToken || handledClosureAuthTokenRef.current === authToken) {
+      return "";
+    }
+
+    handledClosureAuthTokenRef.current = authToken;
+    try {
+      const status = await fetchGuacamoleSessionStatus(authToken);
+      if (status.active) {
+        handledClosureAuthTokenRef.current = null;
+        return "";
+      }
+      return status.close_reason?.trim() || "";
+    } catch {
+      handledClosureAuthTokenRef.current = null;
+      return "";
+    }
+  });
+
+  const handleUnexpectedClosure = useEffectEvent(async ({
+    authToken,
+    fallbackStatus,
+    fallbackError,
+    fallbackTargetHost,
+  }: {
+    authToken: string | null;
+    fallbackStatus: string;
+    fallbackError?: string | null;
+    fallbackTargetHost: string | null;
+  }) => {
+    const closeReason = await resolveCloseReason(authToken);
+    disconnectClient({ revoke: false, disconnectTransport: false });
+    if (!closeReason) {
+      void refreshDiagnostics(fallbackTargetHost);
+    }
+    onUpdate({
+      status: closeReason ? "session_closed" : fallbackStatus,
+      connected: false,
+      error: closeReason || fallbackError || null,
+      clientSession: null,
+    });
+  });
+
   const updateRequiredPromptValue = useCallback((name: string, value: string) => {
     setRequiredPrompt((current) => {
       if (!current) {
@@ -432,6 +518,16 @@ export function GuacamoleViewport({
       return;
     }
 
+    if (connectInFlightRef.current) {
+      debugLog("connect-skipped-in-flight", {
+        status: session.status,
+        persistedAuthToken: maskDebugValue(session.clientSession?.authToken),
+      });
+      return;
+    }
+
+    connectInFlightRef.current = true;
+
     const connectGeneration = connectGenerationRef.current + 1;
     connectGenerationRef.current = connectGeneration;
     hasConnectedRef.current = false;
@@ -447,13 +543,23 @@ export function GuacamoleViewport({
     let clientSession: NonNullable<GuacamoleClientSession["client_session"]> | null = null;
     debugLog("connect-start", {
       forceFresh: !!options?.forceFresh,
+      readOnly: session.readOnly,
+      recorded: session.recorded,
+      requestedConnectionId: session.requestedConnectionId ?? "<none>",
+      requestedVmUsername: session.requestedVmUsername ?? "<none>",
       persistedAuthToken: maskDebugValue(session.clientSession?.authToken),
       persistedResumeTunnel: session.clientSession?.resumeTunnelUuid ?? "<none>",
     });
     try {
       sessionData = await createGuacamoleClientSession(session.agentId, {
         forceFresh: options?.forceFresh,
+        refreshTunnel: refreshTunnelOnNextConnectRef.current,
+        connectionId: session.requestedConnectionId ?? undefined,
+        vmUsername: session.requestedVmUsername ?? undefined,
+        readOnly: session.readOnly,
+        recorded: session.recorded,
       });
+      refreshTunnelOnNextConnectRef.current = false;
       clientSession = sessionData.client_session;
       debugLog("connect-session-fetched", {
         status: sessionData.status,
@@ -462,35 +568,14 @@ export function GuacamoleViewport({
         connectionId: clientSession?.connection_id ?? "<none>",
       });
     } catch (error) {
+      connectInFlightRef.current = false;
+      refreshTunnelOnNextConnectRef.current = false;
       debugLog("connect-session-fetch-failed", {
         error: error instanceof Error ? error.message : String(error),
       });
       onUpdate({
         status: "connect_failed",
         error: error instanceof Error ? error.message : String(error),
-        connected: false,
-      });
-      return;
-    }
-
-    if (connectGenerationRef.current !== connectGeneration) {
-      debugLog("connect-stale-generation", {
-        authToken: maskDebugValue(clientSession?.auth_token),
-      });
-      if (clientSession?.auth_token) {
-        await revokeGuacamoleClientSession(clientSession.auth_token);
-      }
-      return;
-    }
-
-    if (!clientSession) {
-      debugLog("connect-missing-client-session", {
-        status: sessionData?.status ?? "<none>",
-      });
-      onUpdate({
-        status: sessionData?.status ?? "needs_configuration",
-        error: sessionData?.warnings?.[0] ?? "No Guacamole session is configured for this agent.",
-        clientSession: null,
         connected: false,
       });
       return;
@@ -504,12 +589,35 @@ export function GuacamoleViewport({
       });
     }
 
+    if (connectGenerationRef.current !== connectGeneration) {
+      connectInFlightRef.current = false;
+      debugLog("connect-stale-generation", {
+        authToken: maskDebugValue(clientSession?.auth_token),
+      });
+      return;
+    }
+
+    if (!clientSession) {
+      connectInFlightRef.current = false;
+      debugLog("connect-missing-client-session", {
+        status: sessionData?.status ?? "<none>",
+      });
+      onUpdate({
+        status: sessionData?.status ?? "needs_configuration",
+        error: sessionData?.warnings?.[0] ?? "No Guacamole session is configured for this agent.",
+        clientSession: null,
+        connected: false,
+      });
+      return;
+    }
+
     const resolvedTargetHost = sessionData?.resolved_fields?.guacamole_target_host || sessionData?.resolved_fields?.hostname || session.targetHost || null;
     const resolvedConnectionName = sessionData?.resolved_fields?.guacamole_connection_name || sessionData?.connection_label || session.connectionName || null;
     const resolvedTitle = sessionData?.connection_label || session.title;
     const resolvedUsername = sessionData?.resolved_fields?.guacamole_username || "";
     const resolvedDomain = sessionData?.resolved_fields?.guacamole_domain || "";
     authTokenRef.current = clientSession.auth_token;
+    handledClosureAuthTokenRef.current = null;
     debugLog("connect-session-ready", {
       authToken: maskDebugValue(clientSession.auth_token),
       resumeTunnelUuid: clientSession.resume_tunnel_uuid ?? "<none>",
@@ -518,6 +626,7 @@ export function GuacamoleViewport({
     });
     onUpdate({
       title: resolvedTitle,
+      readOnly: Boolean(sessionData?.read_only ?? session.readOnly),
       error: null,
       hint: null,
       targetHost: resolvedTargetHost,
@@ -529,6 +638,7 @@ export function GuacamoleViewport({
     const resumeTunnelUuid = clientSession.resume_tunnel_uuid;
     resumeTunnelUuidRef.current = resumeTunnelUuid ?? null;
     if (!httpTunnelUrl) {
+      connectInFlightRef.current = false;
       debugLog("connect-missing-http-tunnel");
       onUpdate({
         status: "needs_configuration",
@@ -578,6 +688,13 @@ export function GuacamoleViewport({
 
     host.replaceChildren(displayElement);
     displayElement.classList.add("block", "max-w-none");
+    displayElement.style.position = "absolute";
+    displayElement.style.left = "auto";
+    displayElement.style.top = "auto";
+    displayElement.style.right = "0";
+    displayElement.style.bottom = "0";
+    displayElement.style.transform = "";
+    displayElement.style.margin = "0";
 
     const persistedDisplayState = resumeTunnelUuid
       ? loadPersistedDisplayState(clientSession.auth_token, resumeTunnelUuid)
@@ -625,7 +742,7 @@ export function GuacamoleViewport({
       debugLog("retry-without-resume", {
         authToken: maskDebugValue(clientSession.auth_token),
         resumeTunnelUuid,
-        nextAttempt: "reuse-existing-session",
+        nextAttempt: "fresh-session",
       });
       onUpdate({
         clientSession: null,
@@ -633,7 +750,8 @@ export function GuacamoleViewport({
         error: null,
         connected: false,
       });
-      forceFreshOnNextConnectRef.current = false;
+      forceFreshOnNextConnectRef.current = true;
+      refreshTunnelOnNextConnectRef.current = false;
       setReconnectRequestId((current) => current + 1);
       disconnectClient({ revoke: false, disconnectTransport: true });
       return true;
@@ -656,7 +774,16 @@ export function GuacamoleViewport({
         });
       }
       clientStateRef.current = state;
-      if (state === Guacamole.Client.State.DISCONNECTED || state === Guacamole.Client.State.DISCONNECTING) {
+      if (state === Guacamole.Client.State.DISCONNECTED) {
+        void handleUnexpectedClosure({
+          authToken: authTokenRef.current,
+          fallbackStatus: "disconnected",
+          fallbackError: "The remote desktop session was disconnected.",
+          fallbackTargetHost: resolvedTargetHost,
+        });
+        return;
+      }
+      if (state === Guacamole.Client.State.DISCONNECTING) {
         void refreshDiagnostics(resolvedTargetHost);
       }
       onUpdate({
@@ -677,10 +804,11 @@ export function GuacamoleViewport({
       if (retryWithoutResume()) {
         return;
       }
-      void refreshDiagnostics(resolvedTargetHost);
-      onUpdate({
-        error: status.message || `Guacamole error ${status.code ?? "unknown"}`,
-        connected: false,
+      void handleUnexpectedClosure({
+        authToken: authTokenRef.current,
+        fallbackStatus: "connect_failed",
+        fallbackError: status.message || `Guacamole error ${status.code ?? "unknown"}`,
+        fallbackTargetHost: resolvedTargetHost,
       });
     };
 
@@ -730,10 +858,20 @@ export function GuacamoleViewport({
         if (retryWithoutResume()) {
           return;
         }
-        void refreshDiagnostics(resolvedTargetHost);
-        onUpdate({
-          status: "tunnel_closed",
-          connected: false,
+        void handleUnexpectedClosure({
+          authToken: authTokenRef.current,
+          fallbackStatus: "tunnel_closed",
+          fallbackError: "The remote desktop tunnel was closed.",
+          fallbackTargetHost: resolvedTargetHost,
+        });
+        return;
+      }
+      if (state === 2 && hasConnectedRef.current) {
+        void handleUnexpectedClosure({
+          authToken: authTokenRef.current,
+          fallbackStatus: "tunnel_closed",
+          fallbackError: "The remote desktop tunnel was closed.",
+          fallbackTargetHost: resolvedTargetHost,
         });
       }
     };
@@ -751,12 +889,21 @@ export function GuacamoleViewport({
         if (retryWithoutResume()) {
           return;
         }
-        void refreshDiagnostics(resolvedTargetHost);
-        onUpdate({
-          error: status.message || `Tunnel error ${status.code ?? "unknown"}`,
-          connected: false,
+        void handleUnexpectedClosure({
+          authToken: authTokenRef.current,
+          fallbackStatus: "tunnel_closed",
+          fallbackError: status.message || `Tunnel error ${status.code ?? "unknown"}`,
+          fallbackTargetHost: resolvedTargetHost,
         });
+        return;
       }
+
+      void handleUnexpectedClosure({
+        authToken: authTokenRef.current,
+        fallbackStatus: "tunnel_closed",
+        fallbackError: status.message || `Tunnel error ${status.code ?? "unknown"}`,
+        fallbackTargetHost: resolvedTargetHost,
+      });
     };
 
     const sendResize = () => {
@@ -786,7 +933,7 @@ export function GuacamoleViewport({
 
     const mouse = new Guacamole.Mouse(displayElement);
     mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = (state) => {
-      if (!isCurrentConnection() || !activeRef.current) {
+      if (!isCurrentConnection() || !activeRef.current || session.readOnly) {
         return;
       }
       setKeyboardCaptureEnabled(true, "mouse-interaction");
@@ -796,10 +943,11 @@ export function GuacamoleViewport({
     const keyboard = new Guacamole.Keyboard(document);
     keyboardRef.current = keyboard;
     keyboard.onkeydown = (keysym) => {
-      if (!isCurrentConnection() || !activeRef.current || !keyboardCaptureEnabledRef.current) {
+      if (!isCurrentConnection() || !activeRef.current || session.readOnly || !keyboardCaptureEnabledRef.current) {
         debugLog("keyboard-keydown-ignored", {
           keysym,
           activeElement: document.activeElement instanceof HTMLElement ? document.activeElement.tagName : "<none>",
+          readOnly: session.readOnly,
           captureEnabled: keyboardCaptureEnabledRef.current,
         });
         return true;
@@ -808,10 +956,11 @@ export function GuacamoleViewport({
       return false;
     };
     keyboard.onkeyup = (keysym) => {
-      if (!isCurrentConnection() || !activeRef.current || !keyboardCaptureEnabledRef.current) {
+      if (!isCurrentConnection() || !activeRef.current || session.readOnly || !keyboardCaptureEnabledRef.current) {
         debugLog("keyboard-keyup-ignored", {
           keysym,
           activeElement: document.activeElement instanceof HTMLElement ? document.activeElement.tagName : "<none>",
+          readOnly: session.readOnly,
           captureEnabled: keyboardCaptureEnabledRef.current,
         });
         return true;
@@ -831,12 +980,12 @@ export function GuacamoleViewport({
     tunnelRef.current = tunnel;
 
     if (connectGenerationRef.current !== connectGeneration) {
+      connectInFlightRef.current = false;
       debugLog("connect-generation-changed-after-init", {
         authToken: maskDebugValue(clientSession.auth_token),
       });
       client.disconnect();
       tunnel.disconnect();
-      await revokeGuacamoleClientSession(clientSession.auth_token);
       return;
     }
 
@@ -869,8 +1018,10 @@ export function GuacamoleViewport({
         dpi: connectDpi,
       });
       client.connect(params.toString());
+      connectInFlightRef.current = false;
       sendResize();
     } catch (error) {
+      connectInFlightRef.current = false;
       debugLog("client-connect-failed", {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -898,7 +1049,23 @@ export function GuacamoleViewport({
   }, [session.connected, session.instanceId]);
 
   useEffect(() => {
-    const shouldReconnectInBackground = !active && Boolean(persistedClientAuthToken);
+    const blockedStatuses = new Set([
+      "session_closed",
+      "connect_failed",
+      "tunnel_closed",
+      "disconnected",
+      "credentials_required",
+      "server_disconnected",
+    ]);
+    const shouldAutoConnect = !blockedStatuses.has(session.status);
+    const shouldReconnectInBackground = shouldAutoConnect && !active && Boolean(persistedClientAuthToken);
+
+    if (!shouldAutoConnect) {
+      debugLog("connect-blocked-status", {
+        status: session.status,
+      });
+      return;
+    }
 
     if (!active && !shouldReconnectInBackground) {
       debugLog("connect-deferred-inactive");
@@ -928,17 +1095,33 @@ export function GuacamoleViewport({
       return;
     }
 
-    const forceFresh = forceFreshOnNextConnectRef.current;
+    const forceFresh = forceFreshOnNextConnectRef.current || hydratedPersistedSessionRef.current;
     forceFreshOnNextConnectRef.current = false;
+    hydratedPersistedSessionRef.current = false;
     void connectClient({ forceFresh });
-  }, [active, debugLog, focusRemoteDisplay, persistedClientAuthToken, persistedClientResumeTunnel, reconnectRequestId, session.instanceId]);
+  }, [active, debugLog, focusRemoteDisplay, persistedClientAuthToken, persistedClientResumeTunnel, reconnectRequestId, session.instanceId, session.status]);
 
   useEffect(() => {
     return () => {
-      disconnectClient({
-        revoke: !pageUnloadingRef.current,
-        disconnectTransport: !pageUnloadingRef.current,
-      });
+      const shouldRevoke = !pageUnloadingRef.current;
+
+      if (!shouldRevoke) {
+        disconnectClient({
+          revoke: false,
+          disconnectTransport: false,
+        });
+        return;
+      }
+
+      const cleanupTimerId = window.setTimeout(() => {
+        pendingViewportCleanupByInstanceId.delete(session.instanceId);
+        disconnectClient({
+          revoke: true,
+          disconnectTransport: true,
+        });
+      }, 700);
+
+      pendingViewportCleanupByInstanceId.set(session.instanceId, cleanupTimerId);
     };
   }, [disconnectClient, reconnectRequestId, session.instanceId]);
 
@@ -961,6 +1144,22 @@ export function GuacamoleViewport({
       window.cancelAnimationFrame(handle);
     };
   }, [active, focusRemoteDisplay, session.connected, session.instanceId, setKeyboardCaptureEnabled]);
+
+  useEffect(() => {
+    if (!active || !session.connected) {
+      return;
+    }
+
+    const timeouts = [0, 180, 520].map((delay) => window.setTimeout(() => {
+      sendResizeRef.current();
+    }, delay));
+
+    return () => {
+      for (const timeout of timeouts) {
+        window.clearTimeout(timeout);
+      }
+    };
+  }, [active, session.connected, session.fullscreen, session.minimized]);
 
   useEffect(() => {
     if (!active) {
@@ -1011,7 +1210,7 @@ export function GuacamoleViewport({
             focusRemoteDisplay();
           }
         }}
-        className="flex h-full w-full items-center justify-center overflow-hidden bg-slate-950 select-none outline-none"
+        className="absolute inset-0 overflow-hidden bg-slate-950 select-none outline-none"
       />
       {requiredPrompt && (
         <GuacamoleRequiredPrompt

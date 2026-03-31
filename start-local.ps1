@@ -4,7 +4,12 @@ param(
     [int]$BackendPort = 8765,
     [int]$GuacamolePort = 8088,
     [string]$GuacamoleBaseUrl = "",
+    [string]$GuacamoleAuthUsername = "",
+    [string]$GuacamoleAuthPassword = "",
+    [string]$GuacamoleAuthProvider = "",
     [switch]$DisableGuacamoleProxy,
+    [switch]$LanHttp,
+    [string]$AuthPublicUrl = "",
     [string]$CaddyExecutable = "caddy",
     [switch]$OpenBrowser
 )
@@ -17,8 +22,55 @@ $pythonExe = Join-Path $repoRoot "env\Scripts\python.exe"
 $caddyScript = Join-Path $repoRoot "run-caddy.ps1"
 $nextCli = Join-Path $frontendRoot "node_modules\.bin\next.cmd"
 $nextLockFile = Join-Path $frontendRoot ".next\dev\lock"
-$publicUrl = "https://$Hostname"
 $guacamoleBaseUrl = if ($GuacamoleBaseUrl) { $GuacamoleBaseUrl.TrimEnd('/') } else { "http://127.0.0.1:$GuacamolePort/guacamole" }
+$guacamoleAuthUsername = if ($GuacamoleAuthUsername) { $GuacamoleAuthUsername } else { [Environment]::GetEnvironmentVariable("GUACAMOLE_AUTH_USERNAME", "Process") }
+$guacamoleAuthPassword = if ($GuacamoleAuthPassword) { $GuacamoleAuthPassword } else { [Environment]::GetEnvironmentVariable("GUACAMOLE_AUTH_PASSWORD", "Process") }
+$guacamoleAuthProvider = if ($GuacamoleAuthProvider) { $GuacamoleAuthProvider } else { [Environment]::GetEnvironmentVariable("GUACAMOLE_AUTH_PROVIDER", "Process") }
+
+function Test-IsIpv4Literal {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+
+    return $Value.Trim() -match '^(?:\d{1,3}\.){3}\d{1,3}$'
+}
+
+function Get-PrimaryLanIPv4 {
+    $address = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.IPAddress -and
+            $_.IPAddress -notlike '127.*' -and
+            $_.PrefixOrigin -ne 'WellKnown'
+        } |
+        Sort-Object InterfaceMetric, SkipAsSource |
+        Select-Object -First 1 -ExpandProperty IPAddress
+
+    return [string]$address
+}
+
+$LanHttp = [bool]($LanHttp -or (Test-IsIpv4Literal $Hostname))
+$useDirectLanMode = $LanHttp
+$publicScheme = if ($useDirectLanMode) { "http" } else { "https" }
+$publicPort = if ($useDirectLanMode) { $FrontendPort } else { 443 }
+$publicUrl = if ($useDirectLanMode) { "http://${Hostname}:$FrontendPort" } else { "$($publicScheme)://$Hostname" }
+$backendPublicUrl = if ($useDirectLanMode) { "http://${Hostname}:$BackendPort" } else { "$($publicScheme)://$Hostname" }
+$effectiveAuthPublicUrl = if ($AuthPublicUrl) { $AuthPublicUrl.TrimEnd('/') } else { $backendPublicUrl }
+$microsoftCallbackUrl = "$effectiveAuthPublicUrl/api/users/callback/microsoft"
+$frontendListenHost = if ($useDirectLanMode) { "0.0.0.0" } else { "127.0.0.1" }
+$frontendLoopbackUrl = "http://127.0.0.1:$FrontendPort"
+$backendLoopbackUrl = "http://127.0.0.1:$BackendPort"
+
+function ConvertTo-SingleQuotedPowerShellLiteral {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return "''"
+    }
+
+    return "'" + $Value.Replace("'", "''") + "'"
+}
 
 function Get-ListeningProcess {
     param([int]$Port)
@@ -75,8 +127,16 @@ function Start-FrontendIfNeeded {
     $frontendProcess = Get-ListeningProcess -Port $FrontendPort
     if ($frontendProcess) {
         if ($frontendProcess.ProcessName -ieq "node") {
-            Write-Host "Frontend already listening on http://127.0.0.1:$FrontendPort; reusing process $($frontendProcess.Id)."
+            if ($useDirectLanMode) {
+                Write-Host "Restarting existing frontend process $($frontendProcess.Id) so LAN mode can bind to $frontendListenHost with direct backend URLs."
+                Stop-Process -Id $frontendProcess.Id -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 1
+                $frontendProcess = $null
+            }
+            else {
+            Write-Host "Frontend already listening on $frontendLoopbackUrl; reusing process $($frontendProcess.Id)."
             return
+            }
         }
 
         throw "Port $FrontendPort is already in use by $($frontendProcess.ProcessName) (PID $($frontendProcess.Id)). Free the port before running start-local.ps1."
@@ -88,21 +148,49 @@ function Start-FrontendIfNeeded {
         throw "Next.js CLI not found at $nextCli. Run npm install in the frontend first."
     }
 
-    Start-Process -FilePath $nextCli -WorkingDirectory $frontendRoot -ArgumentList 'dev', '--hostname', '127.0.0.1', '--port', "$FrontendPort" | Out-Null
+    if ($useDirectLanMode) {
+        $frontendApiUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $backendPublicUrl
+        $frontendWsUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral "ws://${Hostname}:$BackendPort/frontend"
+        $nextCliLiteral = ConvertTo-SingleQuotedPowerShellLiteral $nextCli
+        $frontendRootLiteral = ConvertTo-SingleQuotedPowerShellLiteral $frontendRoot
+        $command = @"
+Set-Location $frontendRootLiteral
+`$env:NEXT_PUBLIC_API_URL = $frontendApiUrlLiteral
+`$env:NEXT_PUBLIC_WS_URL = $frontendWsUrlLiteral
+& $nextCliLiteral dev --hostname $frontendListenHost --port $FrontendPort
+"@
+        Start-Process powershell -ArgumentList '-NoExit', '-NoProfile', '-Command', $command | Out-Null
+    }
+    else {
+        Start-Process -FilePath $nextCli -WorkingDirectory $frontendRoot -ArgumentList 'dev', '--hostname', $frontendListenHost, '--port', "$FrontendPort" | Out-Null
+    }
 
     if (-not (Wait-ForPort -Port $FrontendPort)) {
         throw "Frontend did not start on port $FrontendPort. The script prevents port fallback so local routing stays stable."
     }
 
-    Write-Host "Frontend started on http://127.0.0.1:$FrontendPort"
+    if ($useDirectLanMode) {
+        Write-Host "Frontend started on $publicUrl"
+    }
+    else {
+        Write-Host "Frontend started on $frontendLoopbackUrl"
+    }
 }
 
 function Start-BackendIfNeeded {
     $backendProcess = Get-ListeningProcess -Port $BackendPort
     if ($backendProcess) {
         if ($backendProcess.ProcessName -match "python") {
-            Write-Host "Backend already listening on http://127.0.0.1:$BackendPort; reusing process $($backendProcess.Id)."
-            return
+            if ($useDirectLanMode -or $AuthPublicUrl) {
+                Write-Host "Restarting existing backend process $($backendProcess.Id) so the public auth URL is applied correctly."
+                Stop-Process -Id $backendProcess.Id -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 1
+                $backendProcess = $null
+            }
+            else {
+                Write-Host "Backend already listening on http://127.0.0.1:$BackendPort; reusing process $($backendProcess.Id)."
+                return
+            }
         }
 
         throw "Port $BackendPort is already in use by $($backendProcess.ProcessName) (PID $($backendProcess.Id)). Free the port before running start-local.ps1."
@@ -112,10 +200,20 @@ function Start-BackendIfNeeded {
         throw "Python executable not found at $pythonExe"
     }
 
+    $publicUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $effectiveAuthPublicUrl
+    $guacamoleBaseUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $guacamoleBaseUrl
+    $guacamoleAuthUsernameLiteral = ConvertTo-SingleQuotedPowerShellLiteral $guacamoleAuthUsername
+    $guacamoleAuthPasswordLiteral = ConvertTo-SingleQuotedPowerShellLiteral $guacamoleAuthPassword
+    $guacamoleAuthProviderLiteral = ConvertTo-SingleQuotedPowerShellLiteral $guacamoleAuthProvider
+    $pythonExeLiteral = ConvertTo-SingleQuotedPowerShellLiteral $pythonExe
+
     $command = @"
-`$env:VM_AGENT_SERVER_PUBLIC_URL = '$publicUrl'
-`$env:GUACAMOLE_BASE_URL = '$guacamoleBaseUrl'
-& '$pythonExe' -m vm_agent_server.src.server
+`$env:VM_AGENT_SERVER_PUBLIC_URL = $publicUrlLiteral
+`$env:GUACAMOLE_BASE_URL = $guacamoleBaseUrlLiteral
+if ($guacamoleAuthUsernameLiteral -ne '') { `$env:GUACAMOLE_AUTH_USERNAME = $guacamoleAuthUsernameLiteral }
+if ($guacamoleAuthPasswordLiteral -ne '') { `$env:GUACAMOLE_AUTH_PASSWORD = $guacamoleAuthPasswordLiteral }
+if ($guacamoleAuthProviderLiteral -ne '') { `$env:GUACAMOLE_AUTH_PROVIDER = $guacamoleAuthProviderLiteral }
+& $pythonExeLiteral -m vm_agent_server.src.server
 "@
     Start-Process powershell -ArgumentList '-NoExit', '-NoProfile', '-Command', $command | Out-Null
 
@@ -127,24 +225,30 @@ function Start-BackendIfNeeded {
 }
 
 function Start-CaddyIfNeeded {
-    $httpsProcess = Get-ListeningProcess -Port 443
-    if ($httpsProcess) {
-        if ($httpsProcess.ProcessName -ieq "caddy") {
-            Write-Host "Caddy is already listening on port 443; restarting process $($httpsProcess.Id) so routes match the requested local stack."
-            Stop-Process -Id $httpsProcess.Id -Force
+    if ($useDirectLanMode) {
+        Write-Host "Skipping Caddy in LAN HTTP mode. Frontend and backend are exposed directly on their own ports."
+        return
+    }
+
+    $publicProcess = Get-ListeningProcess -Port $publicPort
+    if ($publicProcess) {
+        if ($publicProcess.ProcessName -ieq "caddy") {
+            Write-Host "Caddy is already listening on port $publicPort; restarting process $($publicProcess.Id) so routes match the requested local stack."
+            Stop-Process -Id $publicProcess.Id -Force
             Start-Sleep -Seconds 1
         }
         else {
-            throw "Port 443 is already in use by $($httpsProcess.ProcessName) (PID $($httpsProcess.Id)). Free the port before running start-local.ps1."
+            throw "Port $publicPort is already in use by $($publicProcess.ProcessName) (PID $($publicProcess.Id)). Free the port before running start-local.ps1."
         }
     }
 
     $disableGuacamoleProxyArg = if ($DisableGuacamoleProxy) { " -DisableGuacamoleProxy" } else { "" }
-    $command = "& '$caddyScript' -Hostname '$Hostname' -FrontendPort $FrontendPort -BackendPort $BackendPort -GuacamolePort $GuacamolePort$disableGuacamoleProxyArg -CaddyExecutable '$CaddyExecutable'"
+    $lanHttpArg = if ($LanHttp) { " -LanHttp" } else { "" }
+    $command = "& '$caddyScript' -Hostname '$Hostname' -FrontendPort $FrontendPort -BackendPort $BackendPort -GuacamolePort $GuacamolePort$disableGuacamoleProxyArg$lanHttpArg -CaddyExecutable '$CaddyExecutable'"
     Start-Process powershell -ArgumentList '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command | Out-Null
 
-    if (-not (Wait-ForPort -Port 443)) {
-        throw "Caddy did not start on port 443."
+    if (-not (Wait-ForPort -Port $publicPort)) {
+        throw "Caddy did not start on port $publicPort."
     }
 
     Write-Host "Caddy started on $publicUrl"
@@ -152,11 +256,37 @@ function Start-CaddyIfNeeded {
 
 Write-Host "Launching local stack for $publicUrl"
 Write-Host "Guacamole API base URL: $guacamoleBaseUrl"
+if ($AuthPublicUrl) {
+    Write-Host "Microsoft auth callback base URL override: $effectiveAuthPublicUrl"
+}
+if (Test-IsIpv4Literal $Hostname) {
+    Write-Host "Detected a raw IPv4 host. LAN HTTP mode was enabled automatically because local HTTPS certificates are not reliable on bare IP addresses."
+}
+if ($guacamoleAuthUsername) {
+    Write-Host "Guacamole API username configured for backend session minting."
+}
+else {
+    Write-Host "Guacamole API username is not configured for this run. Remote workspace launch will stay in diagnostics-only mode."
+}
 if ($DisableGuacamoleProxy) {
     Write-Host "Caddy will not proxy /guacamole/* in this run. Use this when Guacamole is hosted externally, for example behind Nginx on another machine."
 }
+elseif ($useDirectLanMode) {
+    Write-Host "LAN mode bypasses Caddy entirely. Frontend and backend will talk directly over HTTP."
+}
 else {
     Write-Host "Caddy will proxy /guacamole/* to local port $GuacamolePort"
+}
+if ($useDirectLanMode) {
+    Write-Host "LAN HTTP mode is enabled. The frontend will listen directly on $publicUrl and the backend on $backendPublicUrl."
+}
+elseif ($Hostname -ne 'localhost') {
+    $lanIp = Get-PrimaryLanIPv4
+    if ($lanIp) {
+        Write-Host "If another LAN client should resolve this hostname, add this hosts entry on that client:"
+        Write-Host "  $lanIp $Hostname"
+        Write-Host "Clients also need to trust the Caddy local CA for HTTPS to work cleanly."
+    }
 }
 
 Start-FrontendIfNeeded
@@ -165,17 +295,41 @@ Start-CaddyIfNeeded
 
 Write-Host ""
 Write-Host "Local stack is ready:"
-Write-Host "  Frontend: http://127.0.0.1:$FrontendPort"
-Write-Host "  Backend:  http://127.0.0.1:$BackendPort"
-Write-Host "  Caddy:    $publicUrl"
+Write-Host "  Frontend: $frontendLoopbackUrl"
+Write-Host "  Backend:  $backendLoopbackUrl"
+if ($useDirectLanMode) {
+    Write-Host "  Public:   $publicUrl"
+    Write-Host "  API:      $backendPublicUrl"
+}
+else {
+    Write-Host "  Caddy:    $publicUrl"
+}
+Write-Host "  Auth:     $effectiveAuthPublicUrl"
+Write-Host "  Callback: $microsoftCallbackUrl"
 Write-Host ""
-Write-Host "Open the app through $publicUrl, not directly through http://127.0.0.1:$FrontendPort, otherwise /api requests stay on the Next.js port and return 404."
+if ($useDirectLanMode) {
+    Write-Host "Open the app through $publicUrl. In this mode the frontend talks to the backend directly on $backendPublicUrl, so Caddy and hosts entries are not needed."
+}
+else {
+    Write-Host "Open the app through $publicUrl, not directly through $frontendLoopbackUrl, otherwise /api requests stay on the Next.js port and return 404."
+}
 Write-Host ""
 if ($DisableGuacamoleProxy) {
     Write-Host "Guacamole does not need to be local for the embedded workspace. FastAPI will use GUACAMOLE_BASE_URL for session minting and tunnel control."
     Write-Host ""
 }
-Write-Host "To switch later from localhost to your Entra host, rerun this script with -Hostname <your-host> and register https://<your-host>/api/users/callback/microsoft in Entra."
+if ($useDirectLanMode) {
+    Write-Host "LAN HTTP mode is best for local-network testing by IP. Microsoft/Entra callbacks generally require HTTPS, so browser SSO may not work in this mode."
+    if ($AuthPublicUrl) {
+        Write-Host "Microsoft sign-in will use the separate callback base URL above, while the UI stays on the LAN IP."
+    }
+}
+else {
+    Write-Host "To switch later from localhost to your Entra host, rerun this script with -Hostname <your-host> or -AuthPublicUrl <https-url> and register $microsoftCallbackUrl in Entra."
+    if ($Hostname -ne 'localhost') {
+        Write-Host "For another LAN machine, add a hosts entry there that points $Hostname to this PC's LAN IP."
+    }
+}
 
 if ($OpenBrowser) {
     Start-Process $publicUrl | Out-Null

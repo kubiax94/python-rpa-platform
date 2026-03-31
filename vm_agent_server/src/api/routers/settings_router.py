@@ -8,6 +8,8 @@ from vm_agent_server.src.api.schemas.settings_responses import ServerSettingsRes
 from vm_agent_server.src.settings.models import (
     AzureSsoPatch,
     DeploymentDefaultsPatch,
+    GuacamoleSettingsPatch,
+    GuacamoleRecordingSettingsPatch,
     IdentitySettingsPatch,
     ServerSettings,
     ServerSettingsPatch,
@@ -47,6 +49,7 @@ def build_settings_router(server_settings_service: ServerSettingsService, user_s
         patch = ServerSettingsPatch(
             deployment=(DeploymentDefaultsPatch.model_validate(body.deployment.model_dump(exclude_none=True)) if body.deployment else None),
             identity=identity_patch,
+            guacamole=(GuacamoleSettingsPatch.model_validate(body.guacamole.model_dump(exclude_none=True)) if body.guacamole else None),
         )
 
         if identity_patch is None:

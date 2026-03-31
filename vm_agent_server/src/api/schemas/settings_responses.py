@@ -36,6 +36,31 @@ class IdentitySettingsResponse(ApiResponseModel):
     azure: AzureSsoSettingsResponse = AzureSsoSettingsResponse()
 
 
+class GuacamoleRecordingSettingsResponse(ApiResponseModel):
+    enabled: bool = False
+    browse_url: str = ""
+    path_template: str = ""
+    name_template: str = "{connection_name}-{timestamp}.guac"
+    create_path: bool = True
+    exclude_output: bool = False
+    exclude_mouse: bool = False
+    exclude_touch: bool = False
+    include_keys: bool = True
+
+
+class GuacamoleDisplaySettingsResponse(ApiResponseModel):
+    mode: str = "dynamic"
+    width: int | None = None
+    height: int | None = None
+    dpi: int = 96
+
+
+class GuacamoleSettingsResponse(ApiResponseModel):
+    display: GuacamoleDisplaySettingsResponse = GuacamoleDisplaySettingsResponse()
+    recording: GuacamoleRecordingSettingsResponse = GuacamoleRecordingSettingsResponse()
+
+
 class ServerSettingsResponse(ApiResponseModel):
     deployment: DeploymentDefaultsResponse = DeploymentDefaultsResponse()
     identity: IdentitySettingsResponse = IdentitySettingsResponse()
+    guacamole: GuacamoleSettingsResponse = GuacamoleSettingsResponse()

@@ -13,6 +13,8 @@ class UserIdentity(BaseModel):
     username: str
     display_name: str = ""
     email: str = ""
+    avatar_url: str = ""
+    avatar_initials: str = ""
     auth_provider: str
     roles: list[str] = Field(default_factory=list)
     group_ids: list[str] = Field(default_factory=list)

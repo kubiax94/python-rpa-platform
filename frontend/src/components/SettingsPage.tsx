@@ -1,13 +1,16 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { GuacamoleRecordingPlayerDialog } from "@/components/GuacamoleRecordingPlayerDialog";
 import {
   killAllTrackedGuacamoleSessions,
+  type GuacamoleRecordingEntry,
   useGuacamoleConfig,
   useGuacamoleConnections,
+  useGuacamoleRecordings,
   useGuacamoleTrackedSessions,
 } from "@/hooks/useGuacamole";
-import { describeFrontendWebSocketUrl } from "@/lib/auth";
+import { describeFrontendWebSocketUrl, withAccessToken } from "@/lib/auth";
 import { formatRoleLabel, getHighestRole, type AppRole } from "@/lib/rbac";
 import { updateServerSettings, useServerSettings } from "@/hooks/useDeploymentAPI";
 
@@ -37,6 +40,26 @@ function formatDuration(seconds?: number | null): string {
   }
 
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+function formatBytes(value?: number | null): string {
+  if (value == null || Number.isNaN(value)) {
+    return "-";
+  }
+
+  if (value < 1024) {
+    return `${value} B`;
+  }
+
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+
+  if (value < 1024 * 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 function maskToken(value: string): string {
@@ -163,6 +186,11 @@ export function SettingsPage() {
     loading: trackedSessionsLoading,
     refresh: refreshTrackedSessions,
   } = useGuacamoleTrackedSessions();
+  const {
+    data: recordings,
+    loading: recordingsLoading,
+    refresh: refreshRecordings,
+  } = useGuacamoleRecordings();
   const { data: serverSettings, loading: settingsLoading, refresh: refreshServerSettings } = useServerSettings();
   const [draftDeployment, setDraftDeployment] = useState<null | {
     default_repo_url: string;
@@ -192,12 +220,34 @@ export function SettingsPage() {
       }>;
     };
   }>(null);
+  const [draftGuacamole, setDraftGuacamole] = useState<null | {
+    display: {
+      mode: "dynamic" | "fixed";
+      width?: number | null;
+      height?: number | null;
+      dpi: number;
+    };
+    recording: {
+      enabled: boolean;
+      browse_url: string;
+      path_template: string;
+      name_template: string;
+      create_path: boolean;
+      exclude_output: boolean;
+      exclude_mouse: boolean;
+      exclude_touch: boolean;
+      include_keys: boolean;
+    };
+  }>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [identitySaveState, setIdentitySaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [identitySaveError, setIdentitySaveError] = useState<string | null>(null);
+  const [guacamoleSaveState, setGuacamoleSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [guacamoleSaveError, setGuacamoleSaveError] = useState<string | null>(null);
   const [killState, setKillState] = useState<"idle" | "killing" | "success" | "error">("idle");
   const [killMessage, setKillMessage] = useState<string | null>(null);
+  const [playbackEntry, setPlaybackEntry] = useState<GuacamoleRecordingEntry | null>(null);
 
   const deploymentSettings = draftDeployment ?? serverSettings?.deployment ?? {
     default_repo_url: "",
@@ -223,19 +273,40 @@ export function SettingsPage() {
       group_role_mappings: serverSettings?.identity.azure.group_role_mappings ?? [],
     },
   };
+  const guacamoleSettings = draftGuacamole ?? {
+    display: {
+      mode: serverSettings?.guacamole.display.mode ?? "dynamic",
+      width: serverSettings?.guacamole.display.width ?? 1600,
+      height: serverSettings?.guacamole.display.height ?? 900,
+      dpi: serverSettings?.guacamole.display.dpi ?? 96,
+    },
+    recording: {
+      enabled: serverSettings?.guacamole.recording.enabled ?? false,
+      browse_url: serverSettings?.guacamole.recording.browse_url ?? "",
+      path_template: serverSettings?.guacamole.recording.path_template ?? "/recordings/{agent_id}/{username}",
+      name_template: serverSettings?.guacamole.recording.name_template ?? "{connection_name}-{timestamp}.guac",
+      create_path: serverSettings?.guacamole.recording.create_path ?? true,
+      exclude_output: serverSettings?.guacamole.recording.exclude_output ?? false,
+      exclude_mouse: serverSettings?.guacamole.recording.exclude_mouse ?? false,
+      exclude_touch: serverSettings?.guacamole.recording.exclude_touch ?? false,
+      include_keys: serverSettings?.guacamole.recording.include_keys ?? true,
+    },
+  };
 
   const providerLocked = identitySettings.provider_locked;
   const azureActive = identitySettings.azure.active;
 
   const trackedCount = trackedSessions?.tracked_count ?? 0;
   const connectionCount = guacamoleConnections?.connection_count ?? 0;
+  const recordingCount = recordings?.entry_count ?? 0;
 
   const refreshGuacamoleOperations = async () => {
-    await Promise.all([refreshGuacamoleConnections(), refreshTrackedSessions()]);
+    await Promise.all([refreshGuacamoleConnections(), refreshTrackedSessions(), refreshRecordings()]);
   };
 
   return (
-    <div className="min-h-full">
+    <>
+      <div className="min-h-full">
       <div className="mb-6 flex items-end justify-between gap-6">
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-300">Server Settings</p>
@@ -780,7 +851,226 @@ export function SettingsPage() {
                   value={String(guacamoleConfig?.mapping_count ?? 0)}
                   detail={guacamoleConfig?.default_connection_mode || "No mapping strategy configured"}
                 />
+                <MetricCard
+                  label="Recording"
+                  value={guacamoleConfig?.recording?.enabled ? "Enabled" : "Disabled"}
+                  accent={guacamoleConfig?.recording?.enabled ? (guacamoleConfig?.recording?.configured ? "emerald" : "amber") : "slate"}
+                  detail={guacamoleConfig?.recording?.configured ? (guacamoleConfig?.recording?.path_template || "Path configured") : "Filesystem path missing or feature disabled"}
+                />
+                <MetricCard
+                  label="Recording Files"
+                  value={recordingsLoading ? "..." : String(recordingCount)}
+                  accent={recordingCount > 0 ? "cyan" : "slate"}
+                  detail={recordings?.browse_url || "No recording browse URL configured"}
+                />
               </div>
+
+              <SectionCard
+                title="Guacamole Profile"
+                subtitle="These fields define the global display and recording profile used for Guacamole sessions."
+                aside={<span className="font-mono text-xs text-slate-500">{settingsLoading ? "loading" : "editable"}</span>}
+              >
+                <div className="grid gap-4 xl:grid-cols-4">
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-slate-300">Display Mode</span>
+                    <select
+                      value={guacamoleSettings.display.mode}
+                      onChange={(event) => setDraftGuacamole((current) => ({
+                        ...(current ?? guacamoleSettings),
+                        display: {
+                          ...(current?.display ?? guacamoleSettings.display),
+                          mode: event.target.value as "dynamic" | "fixed",
+                        },
+                      }))}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                    >
+                      <option value="dynamic">dynamic</option>
+                      <option value="fixed">fixed</option>
+                    </select>
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-slate-300">Width</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={guacamoleSettings.display.width ?? ""}
+                      onChange={(event) => setDraftGuacamole((current) => ({
+                        ...(current ?? guacamoleSettings),
+                        display: {
+                          ...(current?.display ?? guacamoleSettings.display),
+                          width: event.target.value ? Number(event.target.value) : null,
+                        },
+                      }))}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                      placeholder="1600"
+                    />
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-slate-300">Height</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={guacamoleSettings.display.height ?? ""}
+                      onChange={(event) => setDraftGuacamole((current) => ({
+                        ...(current ?? guacamoleSettings),
+                        display: {
+                          ...(current?.display ?? guacamoleSettings.display),
+                          height: event.target.value ? Number(event.target.value) : null,
+                        },
+                      }))}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                      placeholder="900"
+                    />
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-slate-300">DPI</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={guacamoleSettings.display.dpi}
+                      onChange={(event) => setDraftGuacamole((current) => ({
+                        ...(current ?? guacamoleSettings),
+                        display: {
+                          ...(current?.display ?? guacamoleSettings.display),
+                          dpi: event.target.value ? Number(event.target.value) : 96,
+                        },
+                      }))}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                      placeholder="96"
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-2 text-xs text-slate-500">
+                  Global display profile for new Guacamole sessions. `fixed` uses the resolution above; `dynamic` lets the viewport negotiate size.
+                </div>
+
+                <div className="grid gap-4 xl:grid-cols-2">
+                  <label className="block text-sm xl:col-span-2">
+                    <span className="mb-1 block text-slate-300">Recording Browse URL</span>
+                    <input
+                      value={guacamoleSettings.recording.browse_url}
+                      onChange={(event) => setDraftGuacamole((current) => ({
+                        ...(current ?? guacamoleSettings),
+                        recording: {
+                          ...(current?.recording ?? guacamoleSettings.recording),
+                          browse_url: event.target.value,
+                        },
+                      }))}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                      placeholder="https://guac.example.internal/recordings"
+                    />
+                    <span className="mt-1 block text-xs text-slate-500">To powinien być URL do nginx z włączonym `autoindex_format json` dla katalogu recordings. Backend użyje go do listowania i proxowania pobrań.</span>
+                  </label>
+
+                  <label className="block text-sm xl:col-span-2">
+                    <span className="mb-1 block text-slate-300">Recording Path</span>
+                    <input
+                      value={guacamoleSettings.recording.path_template}
+                      onChange={(event) => setDraftGuacamole((current) => ({
+                        ...(current ?? guacamoleSettings),
+                        recording: {
+                          ...(current?.recording ?? guacamoleSettings.recording),
+                          path_template: event.target.value,
+                        },
+                      }))}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                      placeholder="/recordings/{agent_id}/{username}"
+                    />
+                    <span className="mt-1 block text-xs text-slate-500">Ścieżka musi istnieć po stronie Linux/guacd. Jeśli chcesz to serwować przez nginx, wystaw ten sam katalog read-only.</span>
+                  </label>
+
+                  <label className="block text-sm xl:col-span-2">
+                    <span className="mb-1 block text-slate-300">Recording Name</span>
+                    <input
+                      value={guacamoleSettings.recording.name_template}
+                      onChange={(event) => setDraftGuacamole((current) => ({
+                        ...(current ?? guacamoleSettings),
+                        recording: {
+                          ...(current?.recording ?? guacamoleSettings.recording),
+                          name_template: event.target.value,
+                        },
+                      }))}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                      placeholder="{connection_name}-{timestamp}.guac"
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {[
+                    ["Enable recording", "enabled"],
+                    ["Automatically create path", "create_path"],
+                    ["Exclude graphics/streams", "exclude_output"],
+                    ["Exclude mouse", "exclude_mouse"],
+                    ["Exclude touch events", "exclude_touch"],
+                    ["Include key events", "include_keys"],
+                  ].map(([label, key]) => (
+                    <label key={key} className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
+                      <span>{label}</span>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(guacamoleSettings.recording[key as keyof typeof guacamoleSettings.recording])}
+                        onChange={(event) => setDraftGuacamole((current) => ({
+                          ...(current ?? guacamoleSettings),
+                          recording: {
+                            ...(current?.recording ?? guacamoleSettings.recording),
+                            [key]: event.target.checked,
+                          },
+                        }))}
+                        className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-cyan-400 focus:ring-cyan-500"
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                <div className="mt-5 flex flex-wrap items-center gap-3">
+                  <button
+                    onClick={async () => {
+                      setGuacamoleSaveState("saving");
+                      setGuacamoleSaveError(null);
+                      try {
+                        await updateServerSettings({
+                          guacamole: {
+                            display: {
+                              mode: guacamoleSettings.display.mode,
+                              width: guacamoleSettings.display.width,
+                              height: guacamoleSettings.display.height,
+                              dpi: guacamoleSettings.display.dpi,
+                            },
+                            recording: {
+                              enabled: guacamoleSettings.recording.enabled,
+                              browse_url: guacamoleSettings.recording.browse_url,
+                              path_template: guacamoleSettings.recording.path_template,
+                              name_template: guacamoleSettings.recording.name_template,
+                              create_path: guacamoleSettings.recording.create_path,
+                              exclude_output: guacamoleSettings.recording.exclude_output,
+                              exclude_mouse: guacamoleSettings.recording.exclude_mouse,
+                              exclude_touch: guacamoleSettings.recording.exclude_touch,
+                              include_keys: guacamoleSettings.recording.include_keys,
+                            },
+                          },
+                        });
+                        await Promise.all([refreshServerSettings(), refreshGuacamoleOperations()]);
+                        setDraftGuacamole(null);
+                        setGuacamoleSaveState("saved");
+                      } catch (error) {
+                        setGuacamoleSaveState("error");
+                        setGuacamoleSaveError(error instanceof Error ? error.message : "Failed to save Guacamole settings");
+                      }
+                    }}
+                    disabled={settingsLoading || guacamoleSaveState === "saving"}
+                    className="rounded-lg bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 transition-colors hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                  >
+                    {guacamoleSaveState === "saving" ? "Saving..." : "Save Guacamole Settings"}
+                  </button>
+                  {guacamoleSaveState === "saved" && <span className="text-xs text-emerald-300">Guacamole settings saved</span>}
+                  {guacamoleSaveError && <span className="text-xs text-rose-300">{guacamoleSaveError}</span>}
+                </div>
+              </SectionCard>
 
               <SectionCard
                 title="Operations"
@@ -864,6 +1154,10 @@ export function SettingsPage() {
                     <DetailRow label="Auth provider" value={guacamoleConfig?.auth_provider || "-"} />
                     <DetailRow label="Default mapping" value={guacamoleConfig?.default_connection_mode || "-"} />
                     <DetailRow label="Connection type" value={guacamoleConfig?.connection_type || "-"} />
+                    <DetailRow label="Recording enabled" value={guacamoleConfig?.recording?.enabled ? "yes" : "no"} />
+                    <DetailRow label="Recording browse URL" value={guacamoleConfig?.recording?.browse_url || "-"} />
+                    <DetailRow label="Recording path" value={guacamoleConfig?.recording?.path_template || "-"} />
+                    <DetailRow label="Recording name" value={guacamoleConfig?.recording?.name_template || "-"} />
                     <DetailRow label="WebSocket tunnel" value={guacamoleConfig?.websocket_tunnel_url || "-"} />
                     <DetailRow label="HTTP tunnel" value={guacamoleConfig?.http_tunnel_url || "-"} />
                   </div>
@@ -891,6 +1185,7 @@ export function SettingsPage() {
                       <thead className="bg-slate-900/90 text-[11px] uppercase tracking-[0.18em] text-slate-500">
                         <tr>
                           <th className="px-3 py-2 text-left font-medium">Agent</th>
+                          <th className="px-3 py-2 text-left font-medium">Owner</th>
                           <th className="px-3 py-2 text-left font-medium">Auth</th>
                           <th className="px-3 py-2 text-left font-medium">Connection</th>
                           <th className="px-3 py-2 text-left font-medium">Source</th>
@@ -904,6 +1199,7 @@ export function SettingsPage() {
                           trackedSessions.sessions.map((trackedSession) => (
                             <tr key={trackedSession.auth_token} className="border-t border-slate-800 text-slate-300">
                               <td className="px-3 py-2 font-medium text-slate-100">{trackedSession.agent_id || "-"}</td>
+                              <td className="px-3 py-2 text-xs text-slate-300">{trackedSession.owner?.display_name || trackedSession.owner?.username || trackedSession.owner?.email || "-"}</td>
                               <td className="px-3 py-2 font-mono text-xs text-slate-400">{maskToken(trackedSession.auth_token)}</td>
                               <td className="px-3 py-2 font-mono text-xs text-slate-300">{trackedSession.connection_id || "-"}</td>
                               <td className="px-3 py-2 font-mono text-xs text-slate-400">{trackedSession.data_source || "-"}</td>
@@ -914,7 +1210,7 @@ export function SettingsPage() {
                           ))
                         ) : (
                           <tr>
-                            <td colSpan={7} className="px-3 py-6 text-center text-sm text-slate-500">
+                            <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
                               {trackedSessionsLoading ? "Loading tracked sessions..." : "No tracked Guacamole sessions are currently held by the backend."}
                             </td>
                           </tr>
@@ -924,6 +1220,81 @@ export function SettingsPage() {
                   </div>
                 </SectionCard>
               </div>
+
+              <SectionCard
+                title="Recording Inventory"
+                subtitle="Files discovered through the configured recording browse URL and served back through the backend download proxy."
+                aside={
+                  <button
+                    onClick={() => void refreshRecordings()}
+                    className="rounded-lg border border-slate-600 bg-slate-950/70 px-3 py-2 text-xs font-medium text-slate-300 hover:border-slate-500"
+                  >
+                    Refresh Recordings
+                  </button>
+                }
+              >
+                {!!recordings?.warnings?.length && (
+                  <div className="mb-4 space-y-2 rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-xs text-amber-100/90">
+                    {recordings.warnings.map((warning) => (
+                      <p key={warning}>{warning}</p>
+                    ))}
+                  </div>
+                )}
+
+                <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/70">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-slate-900/90 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">Agent</th>
+                        <th className="px-3 py-2 text-left font-medium">User</th>
+                        <th className="px-3 py-2 text-left font-medium">File</th>
+                        <th className="px-3 py-2 text-left font-medium">Modified</th>
+                        <th className="px-3 py-2 text-right font-medium">Size</th>
+                        <th className="px-3 py-2 text-right font-medium">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {recordings?.entries?.length ? (
+                        recordings.entries.map((entry) => (
+                          <tr key={entry.relative_path} className="border-t border-slate-800 text-slate-300">
+                            <td className="px-3 py-2 font-mono text-xs text-slate-300">{entry.agent_id || "-"}</td>
+                            <td className="px-3 py-2 font-mono text-xs text-slate-400">{entry.owner?.display_name || entry.owner?.username || entry.owner?.email || entry.username || "-"}</td>
+                            <td className="px-3 py-2">
+                              <div className="text-slate-100">{entry.name || "-"}</div>
+                              <div className="mt-1 font-mono text-[11px] text-slate-500">{entry.relative_path}</div>
+                            </td>
+                            <td className="px-3 py-2 font-mono text-xs text-slate-400">{formatDateTime(entry.modified_at ?? null)}</td>
+                            <td className="px-3 py-2 text-right font-mono text-xs text-slate-300">{formatBytes(entry.size_bytes ?? null)}</td>
+                            <td className="px-3 py-2 text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setPlaybackEntry(entry)}
+                                  className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-200 hover:border-slate-500"
+                                >
+                                  Play
+                                </button>
+                                <a
+                                  href={withAccessToken(entry.download_url)}
+                                  className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-100 hover:border-cyan-400"
+                                >
+                                  Download
+                                </a>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={6} className="px-3 py-6 text-center text-sm text-slate-500">
+                            {recordingsLoading ? "Loading recordings..." : "No recordings were returned by the server."}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </SectionCard>
 
               <SectionCard title="Guacamole Connections" subtitle="Current connections discovered from the configured Guacamole data sources.">
                 <div className="mb-4 grid gap-3 md:grid-cols-3">
@@ -978,6 +1349,12 @@ export function SettingsPage() {
           )}
         </div>
       </div>
-    </div>
+      </div>
+      <GuacamoleRecordingPlayerDialog
+        entry={playbackEntry}
+        open={Boolean(playbackEntry)}
+        onClose={() => setPlaybackEntry(null)}
+      />
+    </>
   );
 }

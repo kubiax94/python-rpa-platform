@@ -8,10 +8,11 @@ import { ActiveTaskNotifications } from "./ActiveTaskNotifications";
 import { SessionPanel } from "@/components/SessionPanel";
 import { CommandPanel } from "./CommandPanel";
 import { GuacamolePanel } from "@/components/GuacamolePanel";
+import { GuacamoleRecordsPanel } from "@/components/GuacamoleRecordsPanel";
 import { MonitoredView } from "./MonitoredView";
 import { OverviewPanel } from "./OverviewPanel";
 
-type AgentTab = "overview" | "processes" | "monitored" | "remote" | "commands";
+type AgentTab = "overview" | "processes" | "monitored" | "remote" | "records" | "commands";
 
 function sanitizeAgentTab(tab: AgentTab, canOperate: boolean): AgentTab {
   if (!canOperate && (tab === "commands" || tab === "remote")) {
@@ -118,6 +119,18 @@ export function AgentDetail({ agentId, state, tasks, canOperate, sendCommand, la
       ),
     },
     {
+      label: "Records",
+      value: null,
+      sub: "session recordings",
+      color: "purple",
+      tab: "records",
+      icon: (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25v13.5m0-13.5 4.5 2.25v9l-4.5 2.25m0-13.5-9 4.5m9 9-9 4.5m0-13.5v9m0-9L2.25 7.5m4.5 11.25-4.5-2.25v-9" />
+        </svg>
+      ),
+    },
+    {
       label: "Commands",
       value: null,
       sub: "send commands",
@@ -170,7 +183,7 @@ export function AgentDetail({ agentId, state, tasks, canOperate, sendCommand, la
       </div>
 
       {/* Tile navigation */}
-      <div className="grid grid-cols-4 gap-3 mb-6">
+      <div className="grid grid-cols-2 gap-3 mb-6 md:grid-cols-3 xl:grid-cols-6">
         {tiles.map((tile) => {
           const c = colorMap[tile.color];
           const isActive = activeTab === tile.tab;
@@ -237,6 +250,8 @@ export function AgentDetail({ agentId, state, tasks, canOperate, sendCommand, la
       )}
 
       <GuacamolePanel agentId={agentId} active={activeTab === "remote"} canOperate={canOperate} />
+
+      <GuacamoleRecordsPanel agentId={agentId} active={activeTab === "records"} />
     </div>
   );
 }

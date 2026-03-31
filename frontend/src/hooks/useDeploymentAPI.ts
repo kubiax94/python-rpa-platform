@@ -82,6 +82,25 @@ export interface ServerSettings {
       }>;
     };
   };
+  guacamole: {
+    display: {
+      mode: "dynamic" | "fixed";
+      width?: number | null;
+      height?: number | null;
+      dpi: number;
+    };
+    recording: {
+      enabled: boolean;
+      browse_url: string;
+      path_template: string;
+      name_template: string;
+      create_path: boolean;
+      exclude_output: boolean;
+      exclude_mouse: boolean;
+      exclude_touch: boolean;
+      include_keys: boolean;
+    };
+  };
 }
 
 export interface IdentitySettingsUpdate {
@@ -104,6 +123,25 @@ export interface IdentitySettingsUpdate {
 export interface ServerSettingsUpdate {
   deployment?: Partial<DeploymentDefaultsSettings>;
   identity?: IdentitySettingsUpdate;
+  guacamole?: {
+    display?: {
+      mode?: "dynamic" | "fixed";
+      width?: number | null;
+      height?: number | null;
+      dpi?: number;
+    };
+    recording?: {
+      enabled?: boolean;
+      browse_url?: string;
+      path_template?: string;
+      name_template?: string;
+      create_path?: boolean;
+      exclude_output?: boolean;
+      exclude_mouse?: boolean;
+      exclude_touch?: boolean;
+      include_keys?: boolean;
+    };
+  };
 }
 
 async function postJSON<T>(url: string, body: unknown): Promise<T> {

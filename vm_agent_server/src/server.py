@@ -26,7 +26,7 @@ from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB
 from vm_agent_server.src.network_event_handler import NetworkEventHandler
 from vm_agent_server.src.add_trust_rdp_host import add_trusted_rdp_host, disable_rdp_publisher_warning
 from vm_agent_server.src.agent_runtime import AgentRuntime, HEARTBEAT_TIMEOUT_SECONDS
-from vm_agent_server.src.guacamole.bridge import build_guacamole_proxy_tunnel_urls, build_guacamole_session, create_guacamole_client_session, get_guacamole_config, get_guacamole_request_base_url, inspect_guacamole_connection, invalidate_guacamole_token, list_guacamole_connections
+from vm_agent_server.src.guacamole.bridge import build_guacamole_proxy_tunnel_urls, build_guacamole_session, create_guacamole_client_session, get_guacamole_config, get_guacamole_request_base_url, inspect_guacamole_connection, invalidate_guacamole_token, list_guacamole_connections, set_guacamole_settings_provider
 from vm_agent_server.src.settings.db import ServerSettingsDB
 from vm_agent_server.src.settings.service import ServerSettingsService
 from vm_agent_server.src.services import DeploymentService, GuacamoleService, RdpMonitorService, TaskService, UserService
@@ -39,6 +39,7 @@ task_db = TaskDB()
 registry_db = AgentRegistryDB()
 server_settings_db = ServerSettingsDB()
 server_settings_service = ServerSettingsService(server_settings_db)
+set_guacamole_settings_provider(server_settings_service.get_snapshot)
 user_service = UserService()
 agent_runtime = AgentRuntime()
 frontend_snapshot_event = asyncio.Event()
@@ -859,6 +860,7 @@ app.include_router(
         registry_db.get_agent,
         _resolve_public_base_url,
         guacamole_service,
+        user_service,
     )
 )
 

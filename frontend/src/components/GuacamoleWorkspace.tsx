@@ -42,10 +42,26 @@ export function GuacamoleWorkspaceProvider({ children }: { children: ReactNode }
     });
   };
 
-  const openSession = (agentId: string, title = "Remote Desktop") => {
+  const openSession = (
+    agentId: string,
+    title = "Remote Desktop",
+    options?: { readOnly?: boolean; recorded?: boolean; requestedConnectionId?: string | null; requestedVmUsername?: string | null },
+  ) => {
     setSessionOverride((current) => {
       const base = current === undefined ? persistedSession : current;
-      if (base && base.agentId === agentId) {
+      const requestedConnectionId = options?.requestedConnectionId || null;
+      const requestedVmUsername = options?.requestedVmUsername || null;
+      const readOnly = options?.readOnly === true;
+      const recorded = options?.recorded === true;
+
+      if (
+        base
+        && base.agentId === agentId
+        && base.requestedConnectionId === requestedConnectionId
+        && base.requestedVmUsername === requestedVmUsername
+        && base.readOnly === readOnly
+        && base.recorded === recorded
+      ) {
         return {
           ...base,
           minimized: false,
@@ -58,6 +74,10 @@ export function GuacamoleWorkspaceProvider({ children }: { children: ReactNode }
         instanceId: createInstanceId(agentId),
         agentId,
         title,
+        readOnly,
+        recorded,
+        requestedConnectionId,
+        requestedVmUsername,
         status: "queued",
         error: null,
         hint: null,
@@ -93,8 +113,41 @@ export function GuacamoleWorkspaceProvider({ children }: { children: ReactNode }
     });
   };
 
+  const exitFullscreenSession = () => {
+    setSessionOverride((current) => {
+      const base = current === undefined ? persistedSession : current;
+      return base ? { ...base, minimized: false, fullscreen: false } : base;
+    });
+  };
+
   const closeSession = () => {
     setSessionOverride(null);
+  };
+
+  const reconnectSession = () => {
+    setSessionOverride((current) => {
+      const base = current === undefined ? persistedSession : current;
+      if (!base) {
+        return base;
+      }
+
+      return {
+        ...base,
+        instanceId: createInstanceId(base.agentId),
+        readOnly: base.readOnly,
+        recorded: base.recorded,
+        requestedConnectionId: base.requestedConnectionId,
+        requestedVmUsername: base.requestedVmUsername,
+        status: "queued",
+        error: null,
+        hint: null,
+        connected: false,
+        minimized: false,
+        fullscreen: false,
+        launchedAt: Date.now(),
+        clientSession: null,
+      };
+    });
   };
 
   return (
@@ -105,6 +158,7 @@ export function GuacamoleWorkspaceProvider({ children }: { children: ReactNode }
         resumeSession,
         minimizeSession,
         fullscreenSession,
+        exitFullscreenSession,
         closeSession,
         isCurrentAgentSession: (agentId: string) => session?.agentId === agentId,
       }}
@@ -116,6 +170,8 @@ export function GuacamoleWorkspaceProvider({ children }: { children: ReactNode }
         onResume={resumeSession}
         onMinimize={minimizeSession}
         onFullscreen={fullscreenSession}
+        onExitFullscreen={exitFullscreenSession}
+        onReconnect={reconnectSession}
         onClose={closeSession}
       />
     </GuacamoleWorkspaceContext.Provider>

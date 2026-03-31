@@ -19,6 +19,8 @@ class TrackedRdpSession:
     data_source: str
     created_at: float
     last_activity_at: float
+    username: str = ""
+    owner: dict[str, str] | None = None
     tunnel_uuids: set[str] = field(default_factory=set)
 
 
@@ -35,12 +37,27 @@ class RdpMonitorService:
         self._idle_timeout_seconds = max(0, configured_timeout)
         self._sessions_by_token: dict[str, TrackedRdpSession] = {}
         self._token_by_tunnel_uuid: dict[str, str] = {}
+        self._primary_tunnel_by_token: dict[str, str] = {}
+
+    def _get_owner_subject(self, owner: dict[str, str] | None) -> str:
+        if not owner:
+            return ""
+        return _clean_string(owner.get("subject"))
 
     @property
     def idle_timeout_seconds(self) -> int:
         return self._idle_timeout_seconds
 
-    def register_session(self, *, agent_id: str, auth_token: str, connection_id: str = "", data_source: str = "") -> None:
+    def register_session(
+        self,
+        *,
+        agent_id: str,
+        auth_token: str,
+        connection_id: str = "",
+        data_source: str = "",
+        username: str = "",
+        owner: dict[str, str] | None = None,
+    ) -> None:
         clean_auth_token = _clean_string(auth_token)
         if not clean_auth_token:
             return
@@ -51,6 +68,9 @@ class RdpMonitorService:
             existing.agent_id = _clean_string(agent_id) or existing.agent_id
             existing.connection_id = _clean_string(connection_id) or existing.connection_id
             existing.data_source = _clean_string(data_source) or existing.data_source
+            existing.username = _clean_string(username) or existing.username
+            if owner is not None:
+                existing.owner = {key: _clean_string(value) for key, value in owner.items()}
             existing.last_activity_at = now
             return
 
@@ -59,24 +79,66 @@ class RdpMonitorService:
             agent_id=_clean_string(agent_id),
             connection_id=_clean_string(connection_id),
             data_source=_clean_string(data_source),
+            username=_clean_string(username),
             created_at=now,
             last_activity_at=now,
+            owner={key: _clean_string(value) for key, value in owner.items()} if owner is not None else None,
         )
 
     def get_session_for_agent(self, agent_id: str) -> TrackedRdpSession | None:
         clean_agent_id = _clean_string(agent_id)
         if not clean_agent_id:
             return None
-        for session in self._sessions_by_token.values():
-            if session.agent_id == clean_agent_id:
-                return session
-        return None
+        matched_sessions = [session for session in self._sessions_by_token.values() if session.agent_id == clean_agent_id]
+        if not matched_sessions:
+            return None
+        return max(matched_sessions, key=lambda session: (session.last_activity_at, session.created_at))
+
+    def get_sessions_for_agent(self, agent_id: str) -> list[TrackedRdpSession]:
+        clean_agent_id = _clean_string(agent_id)
+        if not clean_agent_id:
+            return []
+        matched_sessions = [session for session in self._sessions_by_token.values() if session.agent_id == clean_agent_id]
+        matched_sessions.sort(key=lambda session: (session.last_activity_at, session.created_at), reverse=True)
+        return matched_sessions
+
+    def get_session_for_owner(self, owner_subject: str) -> TrackedRdpSession | None:
+        clean_owner_subject = _clean_string(owner_subject)
+        if not clean_owner_subject:
+            return None
+
+        matched_sessions = [
+            session
+            for session in self._sessions_by_token.values()
+            if self._get_owner_subject(session.owner) == clean_owner_subject
+        ]
+        if not matched_sessions:
+            return None
+        return max(matched_sessions, key=lambda session: (session.last_activity_at, session.created_at))
+
+    def get_session(self, auth_token: str) -> TrackedRdpSession | None:
+        clean_auth_token = _clean_string(auth_token)
+        if not clean_auth_token:
+            return None
+        return self._sessions_by_token.get(clean_auth_token)
 
     def get_primary_tunnel_uuid(self, auth_token: str) -> str:
-        session = self._sessions_by_token.get(_clean_string(auth_token))
+        clean_auth_token = _clean_string(auth_token)
+        session = self._sessions_by_token.get(clean_auth_token)
         if session is None or not session.tunnel_uuids:
             return ""
-        return sorted(session.tunnel_uuids)[0]
+        preferred_tunnel_uuid = _clean_string(self._primary_tunnel_by_token.get(clean_auth_token))
+        if preferred_tunnel_uuid and preferred_tunnel_uuid in session.tunnel_uuids:
+            return preferred_tunnel_uuid
+        next_tunnel_uuid = sorted(session.tunnel_uuids)[-1]
+        self._primary_tunnel_by_token[clean_auth_token] = next_tunnel_uuid
+        return next_tunnel_uuid
+
+    def get_tunnel_uuids(self, auth_token: str) -> list[str]:
+        session = self._sessions_by_token.get(_clean_string(auth_token))
+        if session is None or not session.tunnel_uuids:
+            return []
+        return sorted(session.tunnel_uuids)
 
     def touch_auth_token(self, auth_token: str) -> None:
         session = self._sessions_by_token.get(_clean_string(auth_token))
@@ -99,6 +161,7 @@ class RdpMonitorService:
         session.tunnel_uuids.add(clean_tunnel_uuid)
         session.last_activity_at = time.time()
         self._token_by_tunnel_uuid[clean_tunnel_uuid] = clean_auth_token
+        self._primary_tunnel_by_token[clean_auth_token] = clean_tunnel_uuid
 
     def touch_tunnel(self, tunnel_uuid: str) -> None:
         clean_tunnel_uuid = _clean_string(tunnel_uuid)
@@ -107,6 +170,7 @@ class RdpMonitorService:
         auth_token = self._token_by_tunnel_uuid.get(clean_tunnel_uuid)
         if auth_token:
             self.touch_auth_token(auth_token)
+            self._primary_tunnel_by_token[auth_token] = clean_tunnel_uuid
 
     def release_tunnel(self, tunnel_uuid: str) -> None:
         clean_tunnel_uuid = _clean_string(tunnel_uuid)
@@ -118,6 +182,18 @@ class RdpMonitorService:
         session = self._sessions_by_token.get(auth_token)
         if session is not None:
             session.tunnel_uuids.discard(clean_tunnel_uuid)
+            if self._primary_tunnel_by_token.get(auth_token) == clean_tunnel_uuid:
+                if session.tunnel_uuids:
+                    self._primary_tunnel_by_token[auth_token] = sorted(session.tunnel_uuids)[-1]
+                else:
+                    self._primary_tunnel_by_token.pop(auth_token, None)
+
+    def release_all_tunnels(self, auth_token: str) -> list[str]:
+        released: list[str] = []
+        for tunnel_uuid in self.get_tunnel_uuids(auth_token):
+            self.release_tunnel(tunnel_uuid)
+            released.append(tunnel_uuid)
+        return released
 
     def remove_session(self, auth_token: str) -> TrackedRdpSession | None:
         clean_auth_token = _clean_string(auth_token)
@@ -127,6 +203,8 @@ class RdpMonitorService:
         session = self._sessions_by_token.pop(clean_auth_token, None)
         if session is None:
             return None
+
+        self._primary_tunnel_by_token.pop(clean_auth_token, None)
 
         for tunnel_uuid in list(session.tunnel_uuids):
             if self._token_by_tunnel_uuid.get(tunnel_uuid) == clean_auth_token:
@@ -155,6 +233,9 @@ class RdpMonitorService:
                     "agent_id": session.agent_id,
                     "connection_id": session.connection_id,
                     "data_source": session.data_source,
+                    "username": session.username,
+                    "owner": dict(session.owner) if session.owner else None,
+                    "owner_subject": self._get_owner_subject(session.owner),
                     "created_at": session.created_at,
                     "last_activity_at": session.last_activity_at,
                     "idle_seconds": max(0.0, time.time() - session.last_activity_at),

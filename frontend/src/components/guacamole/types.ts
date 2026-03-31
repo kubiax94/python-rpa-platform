@@ -17,6 +17,10 @@ export type WorkspaceConnection = {
   instanceId: string;
   agentId: string;
   title: string;
+  readOnly: boolean;
+  recorded: boolean;
+  requestedConnectionId: string | null;
+  requestedVmUsername: string | null;
   status: string;
   error: string | null;
   hint: string | null;
@@ -31,10 +35,11 @@ export type WorkspaceConnection = {
 
 export type GuacamoleWorkspaceContextValue = {
   session: WorkspaceConnection | null;
-  openSession: (agentId: string, title?: string) => void;
+  openSession: (agentId: string, title?: string, options?: { readOnly?: boolean; recorded?: boolean; requestedConnectionId?: string | null; requestedVmUsername?: string | null }) => void;
   resumeSession: () => void;
   minimizeSession: () => void;
   fullscreenSession: () => void;
+  exitFullscreenSession: () => void;
   closeSession: () => void;
   isCurrentAgentSession: (agentId: string) => boolean;
 };
@@ -49,6 +54,10 @@ export type DockedWorkspaceRect = {
 export type PersistedWorkspaceSession = {
   agentId: string;
   title: string;
+  readOnly?: boolean;
+  recorded?: boolean;
+  requestedConnectionId?: string | null;
+  requestedVmUsername?: string | null;
   minimized: boolean;
   fullscreen: boolean;
   launchedAt: number;

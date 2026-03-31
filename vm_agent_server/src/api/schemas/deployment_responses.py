@@ -71,6 +71,32 @@ class GuacamoleConfigResponse(ApiResponseModel):
     auth_password_configured: bool = False
     auth_provider: str = "default"
     connection_type: str = "c"
+    recording: dict[str, Any] = Field(default_factory=dict)
     websocket_tunnel_url: str = ""
     http_tunnel_url: str = ""
     notes: list[str] = Field(default_factory=list)
+
+
+class GuacamoleRecordingEntryResponse(ApiResponseModel):
+    agent_id: str = ""
+    username: str = ""
+    owner: dict[str, Any] = Field(default_factory=dict)
+    name: str = ""
+    relative_path: str = ""
+    size_bytes: int | None = None
+    modified_at: int | None = None
+    download_url: str = ""
+
+
+class GuacamoleRecordingsResponse(ApiResponseModel):
+    enabled: bool = False
+    configured: bool = False
+    browse_url: str = ""
+    entry_count: int = 0
+    entries: list[GuacamoleRecordingEntryResponse] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class GuacamoleSessionStatusResponse(ApiResponseModel):
+    active: bool = False
+    close_reason: str = ""
