@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTaskLog } from "@/hooks/useTaskAPI";
-import { API_BASE, fetchJSON, sendJSON } from "@/lib/auth";
+import { API_BASE, fetchJSON, sendJSON, withAccessToken } from "@/lib/auth";
 
 export interface AgentDeployment {
   id: string;
@@ -179,11 +179,11 @@ export async function updateServerSettings(body: ServerSettingsUpdate): Promise<
 }
 
 export function getDeploymentInstallerUrl(deploymentId: string): string {
-  return `${API_BASE}/api/deployments/${encodeURIComponent(deploymentId)}/installer`;
+  return withAccessToken(`${API_BASE}/api/deployments/${encodeURIComponent(deploymentId)}/installer`);
 }
 
 export function getDeploymentPackageUrl(deploymentId: string): string {
-  return `${API_BASE}/api/deployments/${encodeURIComponent(deploymentId)}/package`;
+  return withAccessToken(`${API_BASE}/api/deployments/${encodeURIComponent(deploymentId)}/package`);
 }
 
 export function buildLocalInstallCommand(deployment: AgentDeployment): string {

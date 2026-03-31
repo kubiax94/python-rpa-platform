@@ -10,6 +10,7 @@ param(
     [switch]$DisableGuacamoleProxy,
     [switch]$LanHttp,
     [string]$AuthPublicUrl = "",
+    [string]$AgentWsUrl = "",
     [string]$CaddyExecutable = "caddy",
     [switch]$OpenBrowser
 )
@@ -67,6 +68,15 @@ elseif ($frontendApiBaseUrl.StartsWith('http://')) {
 }
 else {
     "$frontendApiBaseUrl/frontend"
+}
+$effectiveAgentWsUrl = if ($AgentWsUrl) {
+    $AgentWsUrl.TrimEnd('/')
+}
+elseif ($useDirectLanMode) {
+    "ws://${Hostname}:$BackendPort/ws"
+}
+else {
+    ""
 }
 $publicGuacamoleBaseUrl = if ($DisableGuacamoleProxy) {
     $guacamoleBaseUrl
@@ -201,7 +211,7 @@ function Start-BackendIfNeeded {
     $backendProcess = Get-ListeningProcess -Port $BackendPort
     if ($backendProcess) {
         if ($backendProcess.ProcessName -match "python") {
-            if ($useDirectLanMode -or $AuthPublicUrl) {
+            if ($useDirectLanMode -or $AuthPublicUrl -or $AgentWsUrl) {
                 Write-Host "Restarting existing backend process $($backendProcess.Id) so the public auth URL is applied correctly."
                 Stop-Process -Id $backendProcess.Id -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 1
@@ -221,6 +231,7 @@ function Start-BackendIfNeeded {
     }
 
     $publicUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $effectiveAuthPublicUrl
+    $agentWsUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $effectiveAgentWsUrl
     $guacamoleBaseUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $publicGuacamoleBaseUrl
     $guacamoleServerBaseUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $serverGuacamoleBaseUrl
     $guacamoleAuthUsernameLiteral = ConvertTo-SingleQuotedPowerShellLiteral $guacamoleAuthUsername
@@ -230,6 +241,7 @@ function Start-BackendIfNeeded {
 
     $command = @"
 `$env:VM_AGENT_SERVER_PUBLIC_URL = $publicUrlLiteral
+if ($agentWsUrlLiteral -ne '') { `$env:VM_AGENT_SERVER_WS_URL = $agentWsUrlLiteral }
 `$env:GUACAMOLE_BASE_URL = $guacamoleBaseUrlLiteral
 `$env:GUACAMOLE_SERVER_BASE_URL = $guacamoleServerBaseUrlLiteral
 if ($guacamoleAuthUsernameLiteral -ne '') { `$env:GUACAMOLE_AUTH_USERNAME = $guacamoleAuthUsernameLiteral }
@@ -282,6 +294,9 @@ Write-Host "Guacamole public URL: $publicGuacamoleBaseUrl"
 if ($AuthPublicUrl) {
     Write-Host "Microsoft auth callback base URL override: $effectiveAuthPublicUrl"
 }
+if ($effectiveAgentWsUrl) {
+    Write-Host "Agent bootstrap WebSocket URL override: $effectiveAgentWsUrl"
+}
 if (Test-IsIpv4Literal $Hostname) {
     Write-Host "Detected a raw IPv4 host. LAN HTTP mode was enabled automatically because local HTTPS certificates are not reliable on bare IP addresses."
 }
@@ -331,6 +346,9 @@ else {
 }
 Write-Host "  Auth:     $effectiveAuthPublicUrl"
 Write-Host "  Callback: $microsoftCallbackUrl"
+if ($effectiveAgentWsUrl) {
+    Write-Host "  Agent WS: $effectiveAgentWsUrl"
+}
 Write-Host ""
 if ($useDirectLanMode) {
     Write-Host "Open the app through $publicUrl. In this mode the frontend uses $frontendApiBaseUrl for API calls and $frontendWebSocketUrl for websocket traffic."
