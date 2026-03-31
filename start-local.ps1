@@ -58,6 +58,26 @@ $publicUrl = if ($useDirectLanMode) { "http://${Hostname}:$FrontendPort" } else 
 $backendPublicUrl = if ($useDirectLanMode) { "http://${Hostname}:$BackendPort" } else { "$($publicScheme)://$Hostname" }
 $effectiveAuthPublicUrl = if ($AuthPublicUrl) { $AuthPublicUrl.TrimEnd('/') } else { $backendPublicUrl }
 $microsoftCallbackUrl = "$effectiveAuthPublicUrl/api/users/callback/microsoft"
+$frontendApiBaseUrl = $effectiveAuthPublicUrl
+$frontendWebSocketUrl = if ($frontendApiBaseUrl.StartsWith('https://')) {
+    "wss://$($frontendApiBaseUrl.Substring(8))/frontend"
+}
+elseif ($frontendApiBaseUrl.StartsWith('http://')) {
+    "ws://$($frontendApiBaseUrl.Substring(7))/frontend"
+}
+else {
+    "$frontendApiBaseUrl/frontend"
+}
+$publicGuacamoleBaseUrl = if ($DisableGuacamoleProxy) {
+    $guacamoleBaseUrl
+}
+elseif ($AuthPublicUrl) {
+    "$effectiveAuthPublicUrl/guacamole"
+}
+else {
+    $guacamoleBaseUrl
+}
+$serverGuacamoleBaseUrl = $guacamoleBaseUrl
 $frontendListenHost = if ($useDirectLanMode) { "0.0.0.0" } else { "127.0.0.1" }
 $frontendLoopbackUrl = "http://127.0.0.1:$FrontendPort"
 $backendLoopbackUrl = "http://127.0.0.1:$BackendPort"
@@ -149,8 +169,8 @@ function Start-FrontendIfNeeded {
     }
 
     if ($useDirectLanMode) {
-        $frontendApiUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $backendPublicUrl
-        $frontendWsUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral "ws://${Hostname}:$BackendPort/frontend"
+        $frontendApiUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $frontendApiBaseUrl
+        $frontendWsUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $frontendWebSocketUrl
         $nextCliLiteral = ConvertTo-SingleQuotedPowerShellLiteral $nextCli
         $frontendRootLiteral = ConvertTo-SingleQuotedPowerShellLiteral $frontendRoot
         $command = @"
@@ -201,7 +221,8 @@ function Start-BackendIfNeeded {
     }
 
     $publicUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $effectiveAuthPublicUrl
-    $guacamoleBaseUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $guacamoleBaseUrl
+    $guacamoleBaseUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $publicGuacamoleBaseUrl
+    $guacamoleServerBaseUrlLiteral = ConvertTo-SingleQuotedPowerShellLiteral $serverGuacamoleBaseUrl
     $guacamoleAuthUsernameLiteral = ConvertTo-SingleQuotedPowerShellLiteral $guacamoleAuthUsername
     $guacamoleAuthPasswordLiteral = ConvertTo-SingleQuotedPowerShellLiteral $guacamoleAuthPassword
     $guacamoleAuthProviderLiteral = ConvertTo-SingleQuotedPowerShellLiteral $guacamoleAuthProvider
@@ -210,6 +231,7 @@ function Start-BackendIfNeeded {
     $command = @"
 `$env:VM_AGENT_SERVER_PUBLIC_URL = $publicUrlLiteral
 `$env:GUACAMOLE_BASE_URL = $guacamoleBaseUrlLiteral
+`$env:GUACAMOLE_SERVER_BASE_URL = $guacamoleServerBaseUrlLiteral
 if ($guacamoleAuthUsernameLiteral -ne '') { `$env:GUACAMOLE_AUTH_USERNAME = $guacamoleAuthUsernameLiteral }
 if ($guacamoleAuthPasswordLiteral -ne '') { `$env:GUACAMOLE_AUTH_PASSWORD = $guacamoleAuthPasswordLiteral }
 if ($guacamoleAuthProviderLiteral -ne '') { `$env:GUACAMOLE_AUTH_PROVIDER = $guacamoleAuthProviderLiteral }
@@ -256,6 +278,7 @@ function Start-CaddyIfNeeded {
 
 Write-Host "Launching local stack for $publicUrl"
 Write-Host "Guacamole API base URL: $guacamoleBaseUrl"
+Write-Host "Guacamole public URL: $publicGuacamoleBaseUrl"
 if ($AuthPublicUrl) {
     Write-Host "Microsoft auth callback base URL override: $effectiveAuthPublicUrl"
 }
@@ -279,6 +302,8 @@ else {
 }
 if ($useDirectLanMode) {
     Write-Host "LAN HTTP mode is enabled. The frontend will listen directly on $publicUrl and the backend on $backendPublicUrl."
+    Write-Host "Frontend API base URL: $frontendApiBaseUrl"
+    Write-Host "Frontend WebSocket URL: $frontendWebSocketUrl"
 }
 elseif ($Hostname -ne 'localhost') {
     $lanIp = Get-PrimaryLanIPv4
@@ -308,7 +333,7 @@ Write-Host "  Auth:     $effectiveAuthPublicUrl"
 Write-Host "  Callback: $microsoftCallbackUrl"
 Write-Host ""
 if ($useDirectLanMode) {
-    Write-Host "Open the app through $publicUrl. In this mode the frontend talks to the backend directly on $backendPublicUrl, so Caddy and hosts entries are not needed."
+    Write-Host "Open the app through $publicUrl. In this mode the frontend uses $frontendApiBaseUrl for API calls and $frontendWebSocketUrl for websocket traffic."
 }
 else {
     Write-Host "Open the app through $publicUrl, not directly through $frontendLoopbackUrl, otherwise /api requests stay on the Next.js port and return 404."

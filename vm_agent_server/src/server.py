@@ -14,25 +14,29 @@ import uvicorn
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
+from vm_agent_server.src.agents import AgentCommandHandler, AgentLifecycleEventHandler
 from vm_agent_server.src.api.routers.guacamole_router import build_guacamole_router
 from vm_agent_server.src.api.routers.settings_router import build_settings_router
 from vm_agent_server.src.api.routers.users_router import build_users_router
 from vm_agent_server.src.api.schemas.agent_responses import AgentTokenRotationResponse
 from vm_agent_server.src.authz import request_has_minimum_role, role_required_response, websocket_has_minimum_role
-from shared.network.events.example_event import AuthResultData, AuthResultEvent, CaptureProcessScreenshotEvent, CreateSessionEvent, CancelTaskEvent, CancelTaskData, HeartbeatData, SetWindowTrackingData, SetWindowTrackingEvent, StartMonitoredProcessEvent, StartProgramEvent
 from vm_agent_server.src.api.routers.deployment_router import build_deployment_router
 from vm_agent_server.src.api.routers.task_router import build_task_router
 from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB
-from vm_agent_server.src.network_event_handler import NetworkEventHandler
 from vm_agent_server.src.add_trust_rdp_host import add_trusted_rdp_host, disable_rdp_publisher_warning
 from vm_agent_server.src.agent_runtime import AgentRuntime, HEARTBEAT_TIMEOUT_SECONDS
 from vm_agent_server.src.guacamole.bridge import build_guacamole_proxy_tunnel_urls, build_guacamole_session, create_guacamole_client_session, get_guacamole_config, get_guacamole_request_base_url, inspect_guacamole_connection, invalidate_guacamole_token, list_guacamole_connections, set_guacamole_settings_provider
+from vm_agent_server.src.network.agent_session import run_agent_ws_session
+from vm_agent_server.src.network.context import AgentSessionDependencies, FrontendSessionDependencies
+from vm_agent_server.src.network.frontend_session import run_frontend_ws_session
+from vm_agent_server.src.process_monitoring import ProcessMonitoringNetworkHandler
 from vm_agent_server.src.settings.db import ServerSettingsDB
 from vm_agent_server.src.settings.service import ServerSettingsService
 from vm_agent_server.src.services import DeploymentService, GuacamoleService, RdpMonitorService, TaskService, UserService
 from vm_agent_server.src.persistence.telemetry_db import TelemetryDB
 from vm_agent_server.src.tasks.db import TaskDB
 from vm_agent_server.src.tasks.dispatcher import TaskDispatcher, build_agent_task_handler, build_deployment_task_handler
+from vm_agent_server.src.tasks.network_handler import TaskNetworkHandler
 
 telemetry_db = TelemetryDB()
 task_db = TaskDB()
@@ -50,6 +54,8 @@ logger = logging.getLogger(__name__)
 repo_root = Path(__file__).resolve().parents[2]
 task_dispatcher = TaskDispatcher()
 task_service = TaskService(task_db, task_dispatcher)
+task_network_handler = TaskNetworkHandler(task_db, task_service)
+agent_command_handler = AgentCommandHandler()
 deployment_service = DeploymentService(registry_db, task_db, repo_root, server_settings_service=server_settings_service)
 deployment_service.set_task_service(task_service)
 rdp_monitor_service = RdpMonitorService()
@@ -239,6 +245,53 @@ process_manager_watchers: dict[str, set[WebSocket]] = {}
 frontend_watched_agents: dict[WebSocket, set[str]] = {}
 
 
+def _get_agent_lifecycle_handler() -> AgentLifecycleEventHandler:
+    return AgentLifecycleEventHandler(
+        registry_db,
+        agent_runtime,
+        telemetry_db,
+        frontend_snapshot_event,
+        process_manager_watchers,
+    )
+
+
+def _get_process_monitoring_handler() -> ProcessMonitoringNetworkHandler:
+    return ProcessMonitoringNetworkHandler(
+        _send_to_agent,
+        process_manager_watchers,
+        frontend_watched_agents,
+    )
+
+
+def _build_frontend_session_dependencies() -> FrontendSessionDependencies:
+    return FrontendSessionDependencies(
+        user_service=user_service,
+        agent_runtime=agent_runtime,
+        frontend_clients=frontend_clients,
+        frontend_watched_agents=frontend_watched_agents,
+        create_process_monitoring_handler=_get_process_monitoring_handler,
+        agent_command_handler=agent_command_handler,
+        forward_frontend_event=_forward_frontend_event,
+        reject_frontend_command=_reject_frontend_command,
+        websocket_has_minimum_role=websocket_has_minimum_role,
+        logger=logger,
+    )
+
+
+def _build_agent_session_dependencies() -> AgentSessionDependencies:
+    return AgentSessionDependencies(
+        create_lifecycle_handler=_get_agent_lifecycle_handler,
+        task_network_handler=task_network_handler,
+        create_process_monitoring_handler=_get_process_monitoring_handler,
+        set_window_tracking=_set_agent_window_tracking,
+        broadcast_task_event=broadcast_task_event,
+        broadcast_process_screenshot=broadcast_process_screenshot,
+        run_frontend_ws_session=lambda ws, payload: run_frontend_ws_session(ws, payload, _build_frontend_session_dependencies()),
+        frontend_snapshot_event=frontend_snapshot_event,
+        logger=logger,
+    )
+
+
 def _extract_bearer_token(header_value: str | None) -> str | None:
     if not header_value:
         return None
@@ -308,186 +361,7 @@ async def websocket_endpoint(ws: WebSocket):
     auth_token = _extract_bearer_token(ws.headers.get("authorization"))
     await ws.accept()    
     await ws.send_text('{"type":"handshake","data":{"client_id":"server","capabilities":["ws"]}}')
-
-    client_id = None
-    authenticated = False
-    try:
-        while True:
-            msg = await ws.receive_text()
-            try:
-                eh = NetworkEventHandler(None)
-                ev = eh.parser(msg)
-
-                match(ev.type):
-                    case "handshake":
-                        requested_client_id = ev.data.client_id
-                        reported_hostname = str(getattr(ev.data, "hostname", "") or "").strip()
-                        auth_result = await registry_db.authorize_agent(requested_client_id, auth_token)
-                        if not auth_result.get("authorized"):
-                            reason = auth_result.get("reason", "unauthorized")
-                            latest_deployment = await registry_db.get_latest_deployment_for_agent(requested_client_id)
-                            if latest_deployment and reason == "bootstrap token expired":
-                                await registry_db.update_deployment(
-                                    latest_deployment["id"],
-                                    status="expired_bootstrap",
-                                    error="Bootstrap token expired before the first successful agent start.",
-                                    completed_at=int(time.time()),
-                                )
-                                await registry_db.upsert_agent(
-                                    requested_client_id,
-                                    status="bootstrap_expired",
-                                    connection_status="offline",
-                                    last_deployment_id=latest_deployment["id"],
-                                    last_seen_at=int(time.time()),
-                                )
-                            logger.warning("Rejecting agent %s during handshake: %s", requested_client_id, reason)
-                            await ws.send_text(AuthResultEvent(data=AuthResultData(status="error", agent_id=requested_client_id, reason=reason)).model_dump_json())
-                            await ws.close(code=4401, reason=reason)
-                            return
-
-                        expected_hostname = await registry_db.get_expected_hostname_for_agent(requested_client_id)
-                        if expected_hostname and reported_hostname and expected_hostname.lower() != reported_hostname.lower():
-                            reason = f"hostname mismatch: expected {expected_hostname}, got {reported_hostname}"
-                            latest_deployment = await registry_db.get_latest_deployment_for_agent(requested_client_id)
-                            if latest_deployment:
-                                await registry_db.update_deployment(
-                                    latest_deployment["id"],
-                                    error=f"Agent attempted bootstrap from unexpected host '{reported_hostname}'. Expected '{expected_hostname}'.",
-                                )
-                            await registry_db.upsert_agent(
-                                requested_client_id,
-                                hostname=expected_hostname,
-                                status="hostname_mismatch",
-                                connection_status="offline",
-                                last_seen_at=int(time.time()),
-                            )
-                            logger.warning("Rejecting agent %s during handshake: %s", requested_client_id, reason)
-                            await ws.send_text(AuthResultEvent(data=AuthResultData(status="error", agent_id=requested_client_id, reason=reason)).model_dump_json())
-                            await ws.close(code=4403, reason="hostname mismatch")
-                            return
-
-                        client_id = requested_client_id
-                        authenticated = True
-                        issued_secret = auth_result.get("issued_secret") or ""
-                        await ws.send_text(
-                            AuthResultEvent(
-                                data=AuthResultData(
-                                    status="ok",
-                                    agent_id=client_id,
-                                    access_token=issued_secret,
-                                    access_token_issued=bool(issued_secret),
-                                )
-                            ).model_dump_json()
-                        )
-                        logger.info("Handshake received from agent %s", client_id)
-                        await agent_runtime.register_agent(client_id, ws)
-                        await registry_db.upsert_agent(
-                            client_id,
-                            status="registered",
-                            connection_status="online",
-                            last_seen_at=int(time.time()),
-                        )
-                        if process_manager_watchers.get(client_id):
-                            await _set_agent_window_tracking(client_id, True)
-                        frontend_snapshot_event.set()
-                    case "heartbeat":
-                        if not authenticated:
-                            await ws.close(code=4401, reason="handshake required")
-                            return
-                        agent_runtime.merge_heartbeat(ev.data, telemetry_db)
-                        metrics = ev.data.system_metrics if hasattr(ev.data, "system_metrics") else {}
-                        hostname = metrics.get("hostname", "") if isinstance(metrics, dict) else ""
-                        if client_id:
-                            expected_hostname = await registry_db.get_expected_hostname_for_agent(client_id)
-                            if expected_hostname and hostname and expected_hostname.lower() != hostname.lower():
-                                logger.warning(
-                                    "Disconnecting agent %s after heartbeat hostname mismatch: expected %s, got %s",
-                                    client_id,
-                                    expected_hostname,
-                                    hostname,
-                                )
-                                await registry_db.upsert_agent(
-                                    client_id,
-                                    hostname=expected_hostname,
-                                    status="hostname_mismatch",
-                                    connection_status="offline",
-                                    last_seen_at=int(time.time()),
-                                )
-                                await ws.close(code=4403, reason="hostname mismatch")
-                                return
-                        if client_id:
-                            await registry_db.upsert_agent(
-                                client_id,
-                                hostname=hostname,
-                                status="active",
-                                connection_status="online",
-                                metadata=metrics if isinstance(metrics, dict) else {},
-                                last_seen_at=int(time.time()),
-                            )
-                        frontend_snapshot_event.set()
-                    case "task_output":
-                        if not authenticated:
-                            await ws.close(code=4401, reason="handshake required")
-                            return
-                        task_db.append_log(
-                            ev.data.task_id, ev.data.stream, ev.data.data, ev.data.seq)
-                        await broadcast_task_event(ev.data.task_id, {
-                            "type": "task_output",
-                            "task_id": ev.data.task_id,
-                            "stream": ev.data.stream,
-                            "data": ev.data.data,
-                            "seq": ev.data.seq
-                        })
-                    case "task_status":
-                        if not authenticated:
-                            await ws.close(code=4401, reason="handshake required")
-                            return
-                        await task_db.update_task_status(
-                            ev.data.task_id, ev.data.status,
-                            pid=ev.data.pid, exit_code=ev.data.exit_code, error=ev.data.error,
-                            actor=client_id or "agent")
-                        await broadcast_task_event(ev.data.task_id, {
-                            "type": "task_status",
-                            "task_id": ev.data.task_id,
-                            "status": ev.data.status,
-                            "pid": ev.data.pid,
-                            "exit_code": ev.data.exit_code,
-                            "error": ev.data.error
-                        })
-                        # Pipeline step orchestration
-                        if ev.data.status in ("completed", "failed", "timeout"):
-                            await task_service.advance_pipeline(ev.data.task_id, ev.data.status)
-                    case "process_screenshot":
-                        if not authenticated:
-                            await ws.close(code=4401, reason="handshake required")
-                            return
-                        await broadcast_process_screenshot({
-                            "type": "process_screenshot",
-                            "agent_id": ev.data.agent_id or client_id or "",
-                            "target_type": ev.data.target_type,
-                            "pid": ev.data.pid,
-                            "hwnd": ev.data.hwnd,
-                            "session_id": ev.data.session_id,
-                            "request_id": ev.data.request_id,
-                            "status": ev.data.status,
-                            "image_base64": ev.data.image_base64,
-                            "image_format": ev.data.image_format,
-                            "window_title": ev.data.window_title,
-                            "error": ev.data.error,
-                            "captured_at": ev.data.captured_at,
-                        })
-            except Exception as e:
-                logger.exception("Error processing agent message: %s", e)
-            
-    except WebSocketDisconnect:
-        logger.info("Agent websocket disconnected: %s", client_id)
-    except Exception as e:
-        logger.exception("Agent websocket error: %s", e)
-    finally:
-        if client_id:
-            await registry_db.upsert_agent(client_id, status="registered", connection_status="offline", last_seen_at=int(time.time()))
-        if await agent_runtime.unregister_agent(client_id, ws):
-            frontend_snapshot_event.set()
+    await run_agent_ws_session(ws, auth_token, _build_agent_session_dependencies())
 
 
 @app.websocket("/frontend")
@@ -507,64 +381,7 @@ async def frontend_ws(ws: WebSocket):
         await ws.close(code=4401, reason="authentication required")
         return
 
-    access_token = str(auth_payload.get("access_token") or "").strip()
-    session = user_service.get_session(access_token)
-    if session is None:
-        await ws.close(code=4401, reason="unauthorized")
-        return
-
-    ws.state.user_session = session
-    await ws.send_json({"kind": "auth_ok"})
-    frontend_clients.add(ws)
-    frontend_watched_agents[ws] = set()
-    if agent_runtime.latest_stats:
-        await ws.send_json({"kind": "agents_snapshot", "data": agent_runtime.build_frontend_snapshot()})
-    eh = NetworkEventHandler(None)
-    try:
-        while True:
-
-            msg = await ws.receive_text()
-            ev = eh.parser(msg) 
-
-            match(ev.type):
-                case "start_program":
-                    if not websocket_has_minimum_role(ws, "operator"):
-                        await _reject_frontend_command(ws, "operator", ev.type)
-                        continue
-                    spe = StartProgramEvent(data=ev.data)
-                    await _forward_frontend_event("start_program", ev.data.agent_id, spe)
-
-                case "start_monitored_process":
-                    if not websocket_has_minimum_role(ws, "operator"):
-                        await _reject_frontend_command(ws, "operator", ev.type)
-                        continue
-                    spe = StartMonitoredProcessEvent(data=ev.data)
-                    await _forward_frontend_event("start_monitored_process", ev.data.agent_id, spe)
-                    
-                case "create_session":
-                    if not websocket_has_minimum_role(ws, "operator"):
-                        await _reject_frontend_command(ws, "operator", ev.type)
-                        continue
-                    cse = CreateSessionEvent(data=ev.data)
-                    await _forward_frontend_event("create_session", ev.data.agent_id, cse)
-
-                case "capture_process_screenshot":
-                    cpse = CaptureProcessScreenshotEvent(data=ev.data)
-                    await _forward_frontend_event("capture_process_screenshot", ev.data.agent_id, cpse)
-
-                case "watch_process_manager":
-                    await _add_process_manager_watcher(ws, ev.data.agent_id)
-
-                case "unwatch_process_manager":
-                    await _remove_process_manager_watcher(ws, ev.data.agent_id)
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        logger.exception("Frontend websocket error: %s", e)
-    finally:
-        await _remove_all_process_manager_watchers(ws)
-        frontend_watched_agents.pop(ws, None)
-        frontend_clients.discard(ws)
+    await run_frontend_ws_session(ws, auth_payload, _build_frontend_session_dependencies())
 
 async def broadcast_to_frontends(data):
     for ws in list(frontend_clients):
@@ -639,53 +456,19 @@ async def _forward_frontend_event(event_name: str, requested_agent_id: str, even
 
 
 async def _set_agent_window_tracking(agent_id: str, enabled: bool) -> bool:
-    event = SetWindowTrackingEvent(data=SetWindowTrackingData(agent_id=agent_id, enabled=enabled))
-    sent = await _send_to_agent(agent_id, event)
-    if sent:
-        logger.info("Forwarded set_window_tracking=%s to agent %s", enabled, agent_id)
-    else:
-        logger.warning("Failed to forward set_window_tracking=%s to agent %s", enabled, agent_id)
-    return sent
+    return await _get_process_monitoring_handler().set_agent_window_tracking(agent_id, enabled)
 
 
 async def _add_process_manager_watcher(ws: WebSocket, agent_id: str):
-    if not agent_id:
-        return
-
-    watched_agents = frontend_watched_agents.setdefault(ws, set())
-    if agent_id in watched_agents:
-        return
-
-    watchers = process_manager_watchers.setdefault(agent_id, set())
-    was_empty = len(watchers) == 0
-    watchers.add(ws)
-    watched_agents.add(agent_id)
-
-    if was_empty:
-        await _set_agent_window_tracking(agent_id, True)
+    await _get_process_monitoring_handler().add_watcher(ws, agent_id)
 
 
 async def _remove_process_manager_watcher(ws: WebSocket, agent_id: str):
-    if not agent_id:
-        return
-
-    watched_agents = frontend_watched_agents.get(ws)
-    if watched_agents is not None:
-        watched_agents.discard(agent_id)
-
-    watchers = process_manager_watchers.get(agent_id)
-    if not watchers:
-        return
-
-    watchers.discard(ws)
-    if len(watchers) == 0:
-        process_manager_watchers.pop(agent_id, None)
-        await _set_agent_window_tracking(agent_id, False)
+    await _get_process_monitoring_handler().remove_watcher(ws, agent_id)
 
 
 async def _remove_all_process_manager_watchers(ws: WebSocket):
-    for agent_id in list(frontend_watched_agents.get(ws, set())):
-        await _remove_process_manager_watcher(ws, agent_id)
+    await _get_process_monitoring_handler().remove_all_watchers(ws)
 
 # --- REST API for historical data ---
 
