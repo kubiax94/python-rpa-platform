@@ -22,6 +22,7 @@ from vm_agent.src.core.agent_bus import AgentBus
 from vm_agent.src.core.clock import Clock
 from vm_agent.src.core.ilifecycle import ILifeCycle
 from vm_agent.src.core.life_cycle_manager import LifecycleManager
+from vm_agent.src.core.listener_registration import bind_registered_listeners, register_listener
 from vm_agent.src.core.monitored_proces import MonitoredProcess
 from vm_agent.src.core.session_manager import SessionManager
 from vm_agent.src.core.user_session import SessionState, UserSession
@@ -66,10 +67,12 @@ class VmAgent(AgentBus):
         self._sm: SessionManager = SessionManager()    
         self._telemetry_provider: ITelemetryProvider = WindowsTelemetryProvider()
         self._lifecycle.register(self._sm)
-        self._time_started: int = 0
         self._task_executor: TaskExecutor = None  # initialized after client start
         self._window_refresh_interval_sec: float = 60.0
+        self._event_scan_interval_sec: float = 60.0
+        self._last_event_scan_time: float = 0.0
         self._window_tracking_enabled: bool = False
+        self._sync_sent_for_current_connection: bool = False
 
     def _validate_runtime_host(self):
         expected_hostname = str(self._runtime_config.get("hostname") or "").strip()
@@ -87,14 +90,7 @@ class VmAgent(AgentBus):
 
     def run(self):
         logging.info("VmAgent.run() START")
-        AuthResultEvent().register_listener(self, self._handle_auth_result, once=False)
-        StartProgramEvent().register_listener(self, self._start_process, once=False)
-        StartMonitoredProcessEvent().register_listener(self, self._start_monitored_process, once=False)
-        CreateSessionEvent().register_listener(self, self._login_user_session, once=False)
-        ExecuteTaskEvent().register_listener(self, self._execute_task, once=False)
-        CancelTaskEvent().register_listener(self, self._cancel_task, once=False)
-        CaptureProcessScreenshotEvent().register_listener(self, self._capture_process_screenshot, once=False)
-        SetWindowTrackingEvent().register_listener(self, self._set_window_tracking, once=False)
+        bind_registered_listeners(self, self)
         self._status = AgentSatus.INITIALIZING
         asyncio.run(self._async_run())
 
@@ -121,19 +117,19 @@ class VmAgent(AgentBus):
                     self._status = AgentSatus.ERROR
                     logging.error(f"Stopping agent main loop due to fatal connection error: {fatal_error_reason}")
                     break
-                
-                if(self._time_started % 10 == 0):
-                    self._event_viewer.scan()
-                    events = self._event_viewer.get_last_events()
-                    for event in events:
-                        logging.info(f"{event.SourceName} - {event.EventID} - {event.TimeGenerated} - {event.StringInserts}")
-                    logging.info(f"{events}")
-                    self.heartbeat(sync=True)
+ 
+                if not self._client.init:
+                    self._sync_sent_for_current_connection = False
+
+                if self._client.init:
+                    pending_sync = self._consume_pending_sync()
+                    self._scan_event_logs_if_needed(force=pending_sync)
+                    self.heartbeat(sync=pending_sync)
+
                 else:
-                    self.heartbeat()
+                    logging.debug("Skipping heartbeat until agent session is initialized")
 
                 await asyncio.sleep(1)
-                self._time_started += 1
 
 
         except Exception as e:
@@ -170,6 +166,38 @@ class VmAgent(AgentBus):
             data.sync = False
             self._client.send_event(HeartbeatEvent(data=data))
 
+    def _consume_pending_sync(self) -> bool:
+        if not self._client.init:
+            return False
+        if self._sync_sent_for_current_connection:
+            return False
+
+        self._sync_sent_for_current_connection = True
+        logging.info("Sending one-time sync heartbeat for current connection")
+        return True
+
+    def _scan_event_logs_if_needed(self, force: bool = False):
+        now = time()
+        if not force and (now - self._last_event_scan_time) < self._event_scan_interval_sec:
+            return
+
+        new_events = self._event_viewer.scan()
+        self._last_event_scan_time = now
+
+        if not new_events:
+            return
+
+        logging.info("Event log scan captured %s new events", len(new_events))
+        for event in new_events:
+            logging.debug(
+                "%s - %s - %s - %s",
+                event.SourceName,
+                event.EventID,
+                event.TimeGenerated,
+                event.StringInserts,
+            )
+
+    @register_listener(SetWindowTrackingEvent, once=False)
     def _set_window_tracking(self, eventData: SetWindowTrackingData):
         enabled = bool(eventData.enabled)
         if self._window_tracking_enabled == enabled:
@@ -185,6 +213,7 @@ class VmAgent(AgentBus):
             except Exception as exc:
                 logging.debug(f"Failed to perform initial window refresh after enabling tracking: {exc}")
 
+    @register_listener(AuthResultEvent, once=False)
     def _handle_auth_result(self, eventData: AuthResultData):
         if eventData.status != "ok":
             reason = eventData.reason or "unknown error"
@@ -205,6 +234,7 @@ class VmAgent(AgentBus):
         self._client.update_credentials(access_token=eventData.access_token, bootstrap_token=None)
         logging.info("Persisted issued agent access token for %s", eventData.agent_id or self._client.client_id)
     
+    @register_listener(StartProgramEvent, once=False)
     def _start_process(self, eventData: StartProgramData):
         logging.info(f"Starting process with event data: {eventData}")
         logging.info(f"All sessions: {self._sm._sessions}")
@@ -231,6 +261,7 @@ class VmAgent(AgentBus):
 
         #self._client.send_event(SessionCreatedEvent(data=SessionCreatedData(username="asdasd", session_id=123, session_name="TestSession")))
 
+    @register_listener(StartMonitoredProcessEvent, once=False)
     def _start_monitored_process(self, eventData: StartProgramData):
         logging.info(f"Starting monitored process with event data: {eventData}")
         logging.info(f"All sessions: {self._sm._sessions}")
@@ -257,6 +288,7 @@ class VmAgent(AgentBus):
             session_name=session.get_session_name()
         )))
     
+    @register_listener(CreateSessionEvent, once=False)
     def _login_user_session(self, eventData: CreateSessionData):
         logging.info(f"Logging in user session with event data: {eventData.username}")
         logon_process = AbstractProcess("c:\\windows\\system32\\rundll32.exe", "user32.dll,LockWorkStation", "", True, self._telemetry_provider)
@@ -270,6 +302,7 @@ class VmAgent(AgentBus):
 
         send_logon_command(eventData.username, eventData.password, eventData.domain)
 
+    @register_listener(ExecuteTaskEvent, once=False)
     def _execute_task(self, eventData: ExecuteTaskData):
         logging.info(f"Executing task {eventData.task_id}")
         if eventData.session:
@@ -288,6 +321,7 @@ class VmAgent(AgentBus):
 
         asyncio.create_task(self._task_executor.execute(eventData, session))
 
+    @register_listener(CancelTaskEvent, once=False)
     def _cancel_task(self, eventData: CancelTaskData):
         logging.info(f"Cancelling task {eventData.task_id}")
         asyncio.create_task(self._task_executor.cancel(eventData.task_id))
@@ -412,6 +446,7 @@ class VmAgent(AgentBus):
     def _capture_desktop_screenshot_in_session(self, session: UserSession) -> dict:
         return self._run_session_json_helper(session, "capture-screenshot", "--target desktop")
 
+    @register_listener(CaptureProcessScreenshotEvent, once=False)
     def _capture_process_screenshot(self, eventData: CaptureProcessScreenshotData):
         logging.info(
             "Capturing %s screenshot (pid=%s hwnd=%s session_id=%s request=%s)",
