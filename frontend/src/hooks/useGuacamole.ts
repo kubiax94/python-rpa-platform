@@ -278,7 +278,7 @@ export async function fetchGuacamoleVmUserSessions(agentId: string): Promise<Gua
 
 export async function createGuacamoleClientSession(
   agentId: string,
-  options?: { forceFresh?: boolean; refreshTunnel?: boolean; connectionId?: string; vmUsername?: string; readOnly?: boolean; recorded?: boolean },
+  options?: { forceFresh?: boolean; refreshTunnel?: boolean; resumeAuthToken?: string; connectionId?: string; vmUsername?: string; readOnly?: boolean; recorded?: boolean },
 ): Promise<GuacamoleClientSession> {
   const params = new URLSearchParams();
   if (options?.forceFresh) {
@@ -286,6 +286,9 @@ export async function createGuacamoleClientSession(
   }
   if (options?.refreshTunnel) {
     params.set("refresh_tunnel", "true");
+  }
+  if (options?.resumeAuthToken) {
+    params.set("resume_auth_token", options.resumeAuthToken);
   }
   if (options?.connectionId) {
     params.set("connection_id", options.connectionId);

@@ -144,7 +144,7 @@ class GuacamoleService:
         self._websocket_proxy_supported = supported
 
     def _should_use_websocket_tunnel(self) -> bool:
-        return False
+        return True
 
     def _forget_http_tunnels_for_auth_token(self, auth_token: str) -> list[str]:
         released_tunnels = self._rdp_monitor.release_all_tunnels(auth_token)
@@ -308,6 +308,7 @@ class GuacamoleService:
         user_session: UserSession | None = None,
         force_fresh: bool = False,
         refresh_tunnel: bool = False,
+        resume_auth_token: str = "",
         connection_id: str = "",
         vm_username: str = "",
         read_only: bool = False,
@@ -321,19 +322,32 @@ class GuacamoleService:
             proxy_tunnels = self._build_proxy_tunnel_urls(public_base_url)
             if not self._should_use_websocket_tunnel() or self._websocket_proxy_supported is False:
                 proxy_tunnels["websocket"] = ""
+            should_prepare_http_resume = True
 
             requested_connection_id = _clean_string(connection_id)
             requested_username = _clean_string(vm_username) or _clean_string((base_session.get("resolved_fields") or {}).get("guacamole_username"))
             owner_subject = _clean_string((tracked_owner or {}).get("subject"))
+            requested_resume_auth_token = _clean_string(resume_auth_token)
 
-            existing = self._rdp_monitor.get_session_for_owner(owner_subject) if owner_subject else self._rdp_monitor.get_session_for_agent(agent_id)
-            if existing is not None and refresh_tunnel:
-                force_fresh = True
+            existing = None
+            if requested_resume_auth_token:
+                requested_session = self._rdp_monitor.get_session(requested_resume_auth_token)
+                requested_owner_subject = _clean_string(((requested_session.owner or {}) if requested_session else {}).get("subject"))
+                if (
+                    requested_session is not None
+                    and requested_session.agent_id == agent_id
+                    and (not owner_subject or requested_owner_subject == owner_subject)
+                ):
+                    existing = requested_session
+
+            if existing is None:
+                existing = self._rdp_monitor.get_session_for_owner(owner_subject) if owner_subject else self._rdp_monitor.get_session_for_agent(agent_id)
+            reusing_requested_auth_token = existing is not None and _clean_string(existing.auth_token) == requested_resume_auth_token
             if existing is not None and recorded:
                 force_fresh = True
             if existing is not None and existing.agent_id != agent_id:
                 force_fresh = True
-            if existing is not None and requested_connection_id and requested_connection_id != existing.connection_id:
+            if existing is not None and requested_connection_id and requested_connection_id != existing.connection_id and not reusing_requested_auth_token:
                 force_fresh = True
             if existing is not None and force_fresh:
                 self.cancel_scheduled_session_close(existing.auth_token)
@@ -365,7 +379,7 @@ class GuacamoleService:
                     owner=tracked_owner,
                 )
                 resume_tunnel_uuid = ""
-                if refresh_tunnel:
+                if should_prepare_http_resume and refresh_tunnel:
                     released_tunnels = self._forget_http_tunnels_for_auth_token(existing.auth_token)
                     if released_tunnels:
                         logger.info(
@@ -381,9 +395,9 @@ class GuacamoleService:
                         existing.connection_id,
                         base_session.get("display") if isinstance(base_session.get("display"), dict) else {},
                     )
-                if not resume_tunnel_uuid:
+                if should_prepare_http_resume and not resume_tunnel_uuid:
                     resume_tunnel_uuid = self._get_reusable_http_tunnel_uuid(existing.auth_token)
-                if not resume_tunnel_uuid:
+                if should_prepare_http_resume and not resume_tunnel_uuid:
                     resume_tunnel_uuid = await asyncio.to_thread(
                         self._open_http_tunnel,
                         existing.auth_token,
@@ -399,7 +413,7 @@ class GuacamoleService:
                     existing.connection_id or "<none>",
                     resume_tunnel_uuid or "<none>",
                 )
-                return {
+                reusable_session = {
                     **base_session,
                     "status": "ready",
                     "read_only": read_only,
@@ -411,9 +425,11 @@ class GuacamoleService:
                         "connection_type": "c",
                         "display": (base_session.get("display") or {"mode": "dynamic", "dpi": 96}),
                         "tunnels": proxy_tunnels,
-                        "resume_tunnel_uuid": resume_tunnel_uuid,
                     },
                 }
+                if resume_tunnel_uuid:
+                    reusable_session["client_session"]["resume_tunnel_uuid"] = resume_tunnel_uuid
+                return reusable_session
 
             logger.info(
                 "Creating new Guacamole session for owner=%s agent=%s force_fresh=%s",
@@ -445,13 +461,15 @@ class GuacamoleService:
                     owner=tracked_owner,
                 )
                 self._remember_recording_owner(recording_entry, agent_id, tracked_owner)
-                resume_tunnel_uuid = await asyncio.to_thread(
-                    self._open_http_tunnel,
-                    auth_token,
-                    _clean_string(next_client_session.get("data_source")),
-                    _clean_string(next_client_session.get("connection_id")),
-                    next_client_session.get("display") if isinstance(next_client_session.get("display"), dict) else {},
-                )
+                resume_tunnel_uuid = ""
+                if should_prepare_http_resume:
+                    resume_tunnel_uuid = await asyncio.to_thread(
+                        self._open_http_tunnel,
+                        auth_token,
+                        _clean_string(next_client_session.get("data_source")),
+                        _clean_string(next_client_session.get("connection_id")),
+                        next_client_session.get("display") if isinstance(next_client_session.get("display"), dict) else {},
+                    )
                 if resume_tunnel_uuid:
                     next_client_session["resume_tunnel_uuid"] = resume_tunnel_uuid
                 logger.info(
@@ -463,7 +481,14 @@ class GuacamoleService:
                     resume_tunnel_uuid or "<none>",
                 )
             else:
-                logger.warning("Guacamole session creation for agent=%s returned no auth token", agent_id)
+                session_status = _clean_string(session.get("status")) or "<unknown>"
+                session_warnings = session.get("warnings") if isinstance(session.get("warnings"), list) else []
+                logger.warning(
+                    "Guacamole session creation for agent=%s did not return a usable client session; status=%s warnings=%s",
+                    agent_id,
+                    session_status,
+                    session_warnings,
+                )
             session["read_only"] = read_only
             return session
 
@@ -559,6 +584,15 @@ class GuacamoleService:
         task.cancel()
         return True
 
+    def _mark_session_activity(self, auth_token: str) -> bool:
+        clean_auth_token = _clean_string(auth_token)
+        if not clean_auth_token:
+            return False
+
+        self.cancel_scheduled_session_close(clean_auth_token)
+        self._rdp_monitor.touch_auth_token(clean_auth_token)
+        return True
+
     def schedule_session_close(self, auth_token: str, delay_seconds: float = 5.0, *, close_reason: str = "Browser tab closed") -> bool:
         clean_auth_token = _clean_string(auth_token)
         if not clean_auth_token:
@@ -566,11 +600,31 @@ class GuacamoleService:
 
         self.cancel_scheduled_session_close(clean_auth_token)
         clamped_delay = max(0.5, float(delay_seconds))
+        scheduled_at = time.time()
 
         async def close_later() -> None:
             try:
                 await asyncio.sleep(clamped_delay)
                 if self._shutdown_requested.is_set():
+                    return
+
+                tracked_session = self._rdp_monitor.get_session(clean_auth_token)
+                if tracked_session is None:
+                    return
+
+                if tracked_session.last_activity_at > scheduled_at:
+                    logger.info(
+                        "Skipping delayed Guacamole close for auth=%s because newer activity was observed",
+                        _format_token_marker(clean_auth_token),
+                    )
+                    return
+
+                active_websockets = self._websockets_by_auth_token.get(clean_auth_token) or set()
+                if active_websockets:
+                    logger.info(
+                        "Skipping delayed Guacamole close for auth=%s because websocket activity resumed",
+                        _format_token_marker(clean_auth_token),
+                    )
                     return
 
                 if self._get_guacamole_base_url():
@@ -594,7 +648,7 @@ class GuacamoleService:
             return ""
         sockets = self._websockets_by_auth_token.setdefault(auth_token, set())
         sockets.add(ws)
-        self._rdp_monitor.touch_auth_token(auth_token)
+        self._mark_session_activity(auth_token)
         return auth_token
 
     async def unregister_websocket(self, auth_token: str, ws: WebSocket | None = None) -> None:
@@ -614,11 +668,17 @@ class GuacamoleService:
     def touch_websocket(self, raw_query: str) -> None:
         auth_token = self._extract_auth_token_from_query(raw_query)
         if auth_token:
-            self._rdp_monitor.touch_auth_token(auth_token)
+            self._mark_session_activity(auth_token)
 
     def proxy_tunnel_request(self, method: str, raw_query: str, body: bytes, headers: dict[str, str]) -> Response:
         if self._shutdown_requested.is_set():
             return JSONResponse({"error": "Guacamole service is shutting down"}, status_code=503)
+
+        auth_token = self._extract_auth_token_from_query(raw_query)
+        if not auth_token:
+            auth_token = self._extract_auth_token_from_body(body)
+        if auth_token:
+            self._mark_session_activity(auth_token)
 
         base_url = self._get_guacamole_base_url()
         if not base_url:
@@ -661,7 +721,9 @@ class GuacamoleService:
             request_headers["Content-Type"] = content_type
 
         tunnel_token = headers.get("guacamole-tunnel-token") or self._http_tunnel_tokens.get(tunnel_uuid, "")
-        tunnel_cookie = headers.get("cookie") or self._http_tunnel_cookies.get(tunnel_uuid, "")
+        # For resumed Guacamole tunnels prefer the cookie captured when the tunnel was opened.
+        # Browser cookies for the app origin are unrelated and can break upstream tunnel resume.
+        tunnel_cookie = self._http_tunnel_cookies.get(tunnel_uuid, "") or headers.get("cookie") or ""
         if tunnel_token:
             request_headers["Guacamole-Tunnel-Token"] = tunnel_token
         if tunnel_cookie:
@@ -680,11 +742,12 @@ class GuacamoleService:
             error_body = error.read()
             if raw_query.startswith(("read:", "write:")):
                 logger.warning(
-                    "Guacamole HTTP tunnel request failed: method=%s query=%s status=%s token_forwarded=%s",
+                    "Guacamole HTTP tunnel request failed: method=%s query=%s status=%s token_forwarded=%s cookie_forwarded=%s",
                     method,
                     raw_query,
                     error.code,
                     bool(tunnel_token),
+                    bool(tunnel_cookie),
                 )
             if tunnel_uuid and error.code in {404, 410}:
                 self._http_tunnel_tokens.pop(tunnel_uuid, None)
@@ -737,7 +800,7 @@ class GuacamoleService:
                     while True:
                         if self._shutdown_requested.is_set():
                             break
-                        chunk = await asyncio.to_thread(reader, 1024)
+                        chunk = await asyncio.to_thread(reader, 65536)
                         if not chunk:
                             break
                         if tunnel_uuid:

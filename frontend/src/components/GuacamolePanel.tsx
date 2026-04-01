@@ -9,6 +9,7 @@ import {
   type GuacamoleVmUserSession,
 } from "@/hooks/useGuacamole";
 import { useGuacamoleWorkspace } from "@/components/GuacamoleWorkspace";
+import type { WorkspaceConnection } from "@/components/guacamole/types";
 import { loadAuthSession } from "@/lib/auth";
 import { hasMinimumRole } from "@/lib/rbac";
 
@@ -137,6 +138,48 @@ function getSelectedSession(sessions: GuacamoleVmUserSession[], selectedSessionK
   return sessions.find((entry) => entry.session_key === selectedSessionKey) || sessions[0] || null;
 }
 
+function getWorkspaceStatusPresentation(session: WorkspaceConnection | null, isCurrentAgent: boolean, hasGlobalSession: boolean) {
+  const restoringSession = Boolean(
+    isCurrentAgent
+    && session?.clientSession
+    && !session.connected
+    && ["queued", "preparing", "resuming", "credentials_submitted"].includes(session.status),
+  );
+
+  if (session?.connected && isCurrentAgent) {
+    return {
+      className: "bg-emerald-500/15 text-emerald-300",
+      label: "Connected",
+    };
+  }
+
+  if (restoringSession) {
+    return {
+      className: "bg-cyan-500/15 text-cyan-300",
+      label: "Restoring session",
+    };
+  }
+
+  if (isCurrentAgent) {
+    return {
+      className: "bg-blue-500/15 text-blue-300",
+      label: session?.status || "Starting",
+    };
+  }
+
+  if (hasGlobalSession) {
+    return {
+      className: "bg-amber-500/15 text-amber-300",
+      label: "In Use",
+    };
+  }
+
+  return {
+    className: "bg-slate-700 text-slate-300",
+    label: "Idle",
+  };
+}
+
 export function GuacamolePanel({ agentId, active = false, canOperate = false }: GuacamolePanelProps) {
   const { data, loading, sessionLoading } = useGuacamoleSession(agentId);
   const { data: vmUserSessions, loading: vmUserSessionsLoading, refresh: refreshVmUserSessions } = useGuacamoleVmUserSessions(agentId);
@@ -179,9 +222,8 @@ export function GuacamolePanel({ agentId, active = false, canOperate = false }: 
 
   const hasGlobalSession = Boolean(session);
   const isCurrentAgent = isCurrentAgentSession(agentId);
-  const currentStatus = isCurrentAgent ? session?.status : null;
   const currentError = isCurrentAgent ? session?.error : null;
-  const currentConnected = Boolean(isCurrentAgent && session?.connected);
+  const workspaceStatusPresentation = getWorkspaceStatusPresentation(session, isCurrentAgent, hasGlobalSession);
   const effectiveSelectedSessionKey = activeVmSessions.some((entry) => entry.session_key === selectedSessionKey)
     ? selectedSessionKey
     : (activeVmSessions.find((entry) => entry.is_preferred) || activeVmSessions[0])?.session_key || null;
@@ -329,16 +371,8 @@ export function GuacamolePanel({ agentId, active = false, canOperate = false }: 
             <div className="rounded-lg border border-slate-700/80 bg-slate-900/60 p-4 space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-xs uppercase tracking-[0.18em] text-slate-500">Workspace Status</span>
-                <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
-                  currentConnected
-                    ? "bg-emerald-500/15 text-emerald-300"
-                    : isCurrentAgent
-                      ? "bg-blue-500/15 text-blue-300"
-                      : hasGlobalSession
-                        ? "bg-amber-500/15 text-amber-300"
-                        : "bg-slate-700 text-slate-300"
-                }`}>
-                  {currentConnected ? "Connected" : isCurrentAgent ? currentStatus || "Starting" : hasGlobalSession ? "In Use" : "Idle"}
+                <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${workspaceStatusPresentation.className}`}>
+                  {workspaceStatusPresentation.label}
                 </span>
               </div>
               <InfoRow label="Current agent" value={session?.agentId || "None"} />

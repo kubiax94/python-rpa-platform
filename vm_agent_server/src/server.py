@@ -6,7 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from http.cookies import SimpleCookie
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
@@ -320,6 +320,26 @@ def _extract_access_token_from_scope(scope: dict[str, object]) -> str | None:
     return None
 
 
+def _mask_debug_token(value: str | None) -> str:
+    clean_value = (value or "").strip()
+    if not clean_value:
+        return "<none>"
+    if len(clean_value) <= 12:
+        return clean_value
+    return f"{clean_value[:6]}...{clean_value[-6:]}"
+
+
+def _describe_guacamole_websocket_query(raw_query: str) -> dict[str, object]:
+    parsed_query = parse_qs(raw_query, keep_blank_values=True)
+    token_values = parsed_query.get("token") or parsed_query.get("authToken") or []
+    return {
+        "token": _mask_debug_token(token_values[0] if token_values else ""),
+        "data_source": ((parsed_query.get("GUAC_DATA_SOURCE") or [""])[0] or "<none>"),
+        "connection_id": ((parsed_query.get("GUAC_ID") or [""])[0] or "<none>"),
+        "has_resume_tunnel": bool(((parsed_query.get("GUAC_RESUME_TUNNEL") or [""])[0] or "").strip()),
+    }
+
+
 async def _reject_frontend_command(ws: WebSocket, minimum_role: str, event_type: str) -> None:
     await ws.send_json({
         "kind": "command_rejected",
@@ -359,7 +379,7 @@ async def user_auth_middleware(request: Request, call_next):
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     auth_token = _extract_bearer_token(ws.headers.get("authorization"))
-    await ws.accept()    
+    await ws.accept()
     await ws.send_text('{"type":"handshake","data":{"client_id":"server","capabilities":["ws"]}}')
     await run_agent_ws_session(ws, auth_token, _build_agent_session_dependencies())
 
@@ -657,56 +677,111 @@ async def api_guacamole_websocket_tunnel(ws: WebSocket):
 
     raw_query = ws.scope.get("query_string", b"").decode("utf-8")
     upstream_url = f"{upstream_base}?{raw_query}" if raw_query else upstream_base
+    query_details = _describe_guacamole_websocket_query(raw_query)
 
-    await ws.accept()
+    await ws.accept(subprotocol="guacamole")
     tracked_auth_token = await guacamole_service.register_websocket(raw_query, ws)
+    logger.info("Guacamole websocket proxy accepted: %s", query_details)
 
     try:
-        async with websocket_connect(upstream_url, max_size=None) as upstream:
+        async with websocket_connect(
+            upstream_url,
+            max_size=None,
+            subprotocols=["guacamole"],
+            compression=None,
+            ping_interval=None,
+            ping_timeout=None,
+        ) as upstream:
             guacamole_service.set_websocket_proxy_supported(True)
+            logger.info("Guacamole websocket upstream connected: %s", query_details)
+
             async def client_to_upstream():
-                while True:
-                    message = await ws.receive()
-                    if message.get("type") == "websocket.disconnect":
-                        break
-                    guacamole_service.touch_websocket(raw_query)
-                    if message.get("text") is not None:
-                        await upstream.send(message["text"])
-                    elif message.get("bytes") is not None:
-                        await upstream.send(message["bytes"])
+                try:
+                    while True:
+                        message = await ws.receive()
+                        if message.get("type") == "websocket.disconnect":
+                            logger.info("Guacamole websocket browser disconnected: %s", query_details)
+                            return "browser-disconnected"
+                        guacamole_service.touch_websocket(raw_query)
+                        if message.get("text") is not None:
+                            await upstream.send(message["text"])
+                        elif message.get("bytes") is not None:
+                            await upstream.send(message["bytes"])
+                except WebSocketDisconnect:
+                    logger.info("Guacamole websocket proxy client disconnected before tunnel completed: %s", query_details)
+                    return "browser-disconnected"
+                except ConnectionClosed as error:
+                    logger.warning(
+                        "Guacamole websocket upstream closed while receiving browser data: sent=%s received=%s details=%s",
+                        getattr(error, "sent", None),
+                        getattr(error, "rcvd", None),
+                        query_details,
+                    )
+                    return "upstream-closed"
 
             async def upstream_to_client():
-                while True:
-                    payload = await upstream.recv()
-                    guacamole_service.touch_websocket(raw_query)
-                    if isinstance(payload, bytes):
-                        await ws.send_bytes(payload)
-                    else:
-                        await ws.send_text(payload)
+                try:
+                    while True:
+                        payload = await upstream.recv()
+                        guacamole_service.touch_websocket(raw_query)
+                        if isinstance(payload, bytes):
+                            await ws.send_bytes(payload)
+                        else:
+                            await ws.send_text(payload)
+                except ConnectionClosed as error:
+                    logger.warning(
+                        "Guacamole websocket upstream closed: sent=%s received=%s details=%s",
+                        getattr(error, "sent", None),
+                        getattr(error, "rcvd", None),
+                        query_details,
+                    )
+                    return "upstream-closed"
+                except RuntimeError as error:
+                    logger.info("Guacamole websocket browser socket closed during upstream send: %s details=%s", error, query_details)
+                    return "browser-closed"
 
-            await asyncio.gather(client_to_upstream(), upstream_to_client())
+            client_task = asyncio.create_task(client_to_upstream())
+            upstream_task = asyncio.create_task(upstream_to_client())
+            done, pending = await asyncio.wait(
+                {client_task, upstream_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+            for task in done:
+                task.result()
+
+            try:
+                await upstream.close()
+            except Exception:
+                pass
+
+            try:
+                await ws.close()
+            except RuntimeError:
+                pass
     except WebSocketDisconnect:
+        logger.info("Guacamole websocket proxy client disconnected before tunnel completed: %s", query_details)
         return
     except InvalidStatus as error:
         if getattr(error, "response", None) is not None and getattr(error.response, "status_code", None) == 404:
             guacamole_service.set_websocket_proxy_supported(False)
+            logger.warning("Guacamole websocket upstream unavailable (404): %s", query_details)
             try:
                 await ws.close(code=1000, reason="Guacamole websocket tunnel unavailable")
             except RuntimeError:
                 pass
             return
-        logger.warning("Guacamole websocket tunnel proxy failed: %s", error)
+        logger.warning("Guacamole websocket tunnel proxy failed: %s details=%s", error, query_details)
         try:
             await ws.close(code=1011, reason="Guacamole websocket tunnel failed")
         except RuntimeError:
             pass
-    except ConnectionClosed:
-        try:
-            await ws.close()
-        except RuntimeError:
-            pass
     except Exception as error:
-        logger.warning("Guacamole websocket tunnel proxy failed: %s", error)
+        logger.warning("Guacamole websocket tunnel proxy failed: %s details=%s", error, query_details)
         try:
             await ws.close(code=1011, reason="Guacamole websocket tunnel failed")
         except RuntimeError:

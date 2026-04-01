@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
 import Guacamole from "guacamole-common-js";
 import {
-  closeGuacamoleClientSessionOnPageUnload,
   createGuacamoleClientSession,
   fetchGuacamoleSessionStatus,
   fetchGuacamoleDiagnostics,
@@ -13,6 +12,7 @@ import {
 import {
   clearPersistedDisplayState,
   loadPersistedDisplayState,
+  loadPersistedWorkspaceSession,
   persistDisplayState,
   persistWorkspaceSession,
 } from "@/components/guacamole/storage";
@@ -56,6 +56,7 @@ export function GuacamoleViewport({
     instanceId: session.instanceId,
     connected: session.connected,
   });
+  const latestSessionRef = useRef(session);
   const hasConnectedRef = useRef(false);
   const clientStateRef = useRef<number>(Guacamole.Client.State.IDLE);
   const diagnosticsRefreshAtRef = useRef(0);
@@ -66,6 +67,8 @@ export function GuacamoleViewport({
   const connectInFlightRef = useRef(false);
   const handledClosureAuthTokenRef = useRef<string | null>(null);
   const hydratedPersistedSessionRef = useRef(Boolean(session.clientSession));
+  const latestPersistedClientSessionRef = useRef<PersistedGuacamoleClientSession | null>(session.clientSession ?? null);
+  const skipStoredTunnelResumeRef = useRef(false);
   const keyboardCaptureEnabledRef = useRef(false);
   const keyboardRef = useRef<InstanceType<typeof Guacamole.Keyboard> | null>(null);
   const clientRef = useRef<InstanceType<typeof Guacamole.Client> | null>(null);
@@ -81,6 +84,10 @@ export function GuacamoleViewport({
       connected: session.connected,
     };
   }, [session.agentId, session.connected, session.instanceId]);
+
+  useEffect(() => {
+    latestSessionRef.current = session;
+  }, [session]);
 
   const persistedClientAuthToken = session.clientSession?.authToken ?? "";
   const persistedClientResumeTunnel = session.clientSession?.resumeTunnelUuid ?? "";
@@ -110,6 +117,10 @@ export function GuacamoleViewport({
   useEffect(() => {
     activeRef.current = active;
   }, [active]);
+
+  useEffect(() => {
+    latestPersistedClientSessionRef.current = session.clientSession ?? null;
+  }, [session.clientSession]);
 
   const getDisplayProfile = (clientSession: NonNullable<GuacamoleClientSession["client_session"]>) => {
     const profile = clientSession.display;
@@ -217,11 +228,11 @@ export function GuacamoleViewport({
       pageUnloadingRef.current = true;
       const authToken = authTokenRef.current;
       const resumeTunnelUuid = resumeTunnelUuidRef.current;
-      const persistedClientSession = session.clientSession
+      const persistedClientSession = latestPersistedClientSessionRef.current
         ? {
-            ...session.clientSession,
-            authToken: authToken || session.clientSession.authToken,
-            resumeTunnelUuid: resumeTunnelUuid || session.clientSession.resumeTunnelUuid,
+            ...latestPersistedClientSessionRef.current,
+            authToken: authToken || latestPersistedClientSessionRef.current.authToken,
+            resumeTunnelUuid: resumeTunnelUuid || latestPersistedClientSessionRef.current.resumeTunnelUuid,
           }
         : null;
 
@@ -239,9 +250,6 @@ export function GuacamoleViewport({
         hint: null,
         clientSession: persistedClientSession,
       });
-      if (authToken) {
-        closeGuacamoleClientSessionOnPageUnload(authToken, 20);
-      }
       authTokenRef.current = null;
       resumeTunnelUuidRef.current = null;
     };
@@ -410,6 +418,13 @@ export function GuacamoleViewport({
     }
   });
 
+  const persistLatestSessionPatch = useEffectEvent((patch: Partial<WorkspaceConnection>) => {
+    persistWorkspaceSession({
+      ...latestSessionRef.current,
+      ...patch,
+    });
+  });
+
   const resolveCloseReason = useEffectEvent(async (authToken: string | null) => {
     if (!authToken || handledClosureAuthTokenRef.current === authToken) {
       return "";
@@ -541,6 +556,19 @@ export function GuacamoleViewport({
     let sessionData: GuacamoleClientSession | null = null;
     let retriedFreshSession = false;
     let clientSession: NonNullable<GuacamoleClientSession["client_session"]> | null = null;
+    let reusedPersistedSession = false;
+    let attemptedStoredTunnelResume = false;
+    let usingStoredTunnelResume = false;
+    const storedSessionCandidate = loadPersistedWorkspaceSession();
+    const storageClientSession = (
+      storedSessionCandidate
+      && storedSessionCandidate.agentId === session.agentId
+      && (storedSessionCandidate.requestedConnectionId || null) === (session.requestedConnectionId || null)
+      && (storedSessionCandidate.requestedVmUsername || null) === (session.requestedVmUsername || null)
+    )
+      ? storedSessionCandidate.clientSession
+      : null;
+    const reusableClientSession = session.clientSession || storageClientSession;
     debugLog("connect-start", {
       forceFresh: !!options?.forceFresh,
       readOnly: session.readOnly,
@@ -549,36 +577,134 @@ export function GuacamoleViewport({
       requestedVmUsername: session.requestedVmUsername ?? "<none>",
       persistedAuthToken: maskDebugValue(session.clientSession?.authToken),
       persistedResumeTunnel: session.clientSession?.resumeTunnelUuid ?? "<none>",
+      storageCandidateAuthToken: maskDebugValue(storageClientSession?.authToken),
     });
-    try {
-      sessionData = await createGuacamoleClientSession(session.agentId, {
-        forceFresh: options?.forceFresh,
-        refreshTunnel: refreshTunnelOnNextConnectRef.current,
-        connectionId: session.requestedConnectionId ?? undefined,
-        vmUsername: session.requestedVmUsername ?? undefined,
-        readOnly: session.readOnly,
-        recorded: session.recorded,
+    const canReusePersistedSession = Boolean(reusableClientSession && !options?.forceFresh && !refreshTunnelOnNextConnectRef.current);
+    const canDirectResumePersistedTunnel = Boolean(
+      reusableClientSession
+      && reusableClientSession.authToken
+      && reusableClientSession.resumeTunnelUuid
+      && reusableClientSession.tunnels.http
+      && !options?.forceFresh
+      && !refreshTunnelOnNextConnectRef.current
+      && !skipStoredTunnelResumeRef.current,
+    );
+    if (canDirectResumePersistedTunnel && reusableClientSession) {
+      usingStoredTunnelResume = true;
+      clientSession = {
+        auth_token: reusableClientSession.authToken,
+        data_source: reusableClientSession.dataSource,
+        connection_id: reusableClientSession.connectionId,
+        connection_type: reusableClientSession.connectionType,
+        resume_tunnel_uuid: reusableClientSession.resumeTunnelUuid,
+        display: reusableClientSession.display,
+        tunnels: {
+          websocket: reusableClientSession.tunnels.websocket,
+          http: reusableClientSession.tunnels.http,
+        },
+      };
+      sessionData = {
+        enabled: true,
+        configured: true,
+        status: "ready",
+        read_only: session.readOnly,
+        agent_id: session.agentId,
+        source: "persisted",
+        connection_id: reusableClientSession.connectionId,
+        connection_label: session.connectionName || session.title,
+        display: reusableClientSession.display,
+        allow_embed: true,
+        connection_type: reusableClientSession.connectionType,
+        resolved_fields: {
+          guacamole_target_host: session.targetHost || undefined,
+          guacamole_connection_name: session.connectionName || undefined,
+        },
+        tunnels: {
+          websocket: reusableClientSession.tunnels.websocket,
+          http: reusableClientSession.tunnels.http,
+        },
+        warnings: [],
+        client_session: clientSession,
+      };
+      reusedPersistedSession = true;
+      attemptedStoredTunnelResume = true;
+      debugLog("connect-session-reused", {
+        source: session.clientSession ? "props+direct-resume" : "storage+direct-resume",
+        authToken: maskDebugValue(clientSession.auth_token),
+        resumeTunnelUuid: clientSession.resume_tunnel_uuid ?? "<none>",
+        connectionId: clientSession.connection_id ?? "<none>",
+        reusedExistingAuthToken: true,
       });
-      refreshTunnelOnNextConnectRef.current = false;
-      clientSession = sessionData.client_session;
-      debugLog("connect-session-fetched", {
-        status: sessionData.status,
-        authToken: maskDebugValue(clientSession?.auth_token),
-        resumeTunnelUuid: clientSession?.resume_tunnel_uuid ?? "<none>",
-        connectionId: clientSession?.connection_id ?? "<none>",
-      });
-    } catch (error) {
-      connectInFlightRef.current = false;
-      refreshTunnelOnNextConnectRef.current = false;
-      debugLog("connect-session-fetch-failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      onUpdate({
-        status: "connect_failed",
-        error: error instanceof Error ? error.message : String(error),
-        connected: false,
-      });
-      return;
+    } else if (canReusePersistedSession && reusableClientSession) {
+      try {
+        sessionData = await createGuacamoleClientSession(session.agentId, {
+          refreshTunnel: refreshTunnelOnNextConnectRef.current || skipStoredTunnelResumeRef.current,
+          resumeAuthToken: reusableClientSession.authToken,
+          connectionId: session.requestedConnectionId ?? undefined,
+          vmUsername: session.requestedVmUsername ?? undefined,
+          readOnly: session.readOnly,
+          recorded: session.recorded,
+        });
+        skipStoredTunnelResumeRef.current = false;
+        refreshTunnelOnNextConnectRef.current = false;
+        clientSession = sessionData.client_session;
+        reusedPersistedSession = Boolean(
+          clientSession
+          && reusableClientSession.authToken
+          && clientSession.auth_token === reusableClientSession.authToken,
+        );
+        debugLog("connect-session-reused", {
+          source: session.clientSession ? "props+backend-refresh" : "storage+backend-refresh",
+          authToken: maskDebugValue(clientSession?.auth_token),
+          resumeTunnelUuid: clientSession?.resume_tunnel_uuid ?? "<none>",
+          connectionId: clientSession?.connection_id ?? "<none>",
+          reusedExistingAuthToken: reusedPersistedSession,
+        });
+      } catch (error) {
+        connectInFlightRef.current = false;
+        debugLog("connect-session-reuse-failed", {
+          source: session.clientSession ? "props" : "storage",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        onUpdate({
+          status: "connect_failed",
+          error: error instanceof Error ? error.message : String(error),
+          connected: false,
+        });
+        return;
+      }
+    } else {
+      try {
+        sessionData = await createGuacamoleClientSession(session.agentId, {
+          forceFresh: options?.forceFresh,
+          refreshTunnel: refreshTunnelOnNextConnectRef.current,
+          resumeAuthToken: reusableClientSession?.authToken,
+          connectionId: session.requestedConnectionId ?? undefined,
+          vmUsername: session.requestedVmUsername ?? undefined,
+          readOnly: session.readOnly,
+          recorded: session.recorded,
+        });
+        refreshTunnelOnNextConnectRef.current = false;
+        clientSession = sessionData.client_session;
+        debugLog("connect-session-fetched", {
+          status: sessionData.status,
+          authToken: maskDebugValue(clientSession?.auth_token),
+          resumeTunnelUuid: clientSession?.resume_tunnel_uuid ?? "<none>",
+          connectionId: clientSession?.connection_id ?? "<none>",
+        });
+      } catch (error) {
+        connectInFlightRef.current = false;
+        refreshTunnelOnNextConnectRef.current = false;
+        debugLog("connect-session-fetch-failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        onUpdate({
+          status: "connect_failed",
+          error: error instanceof Error ? error.message : String(error),
+          connected: false,
+        });
+        return;
+      }
     }
 
     const hostReady = await waitForRenderableHost(host);
@@ -633,13 +759,25 @@ export function GuacamoleViewport({
       connectionName: resolvedConnectionName,
       clientSession: createPersistedClientSession(clientSession),
     });
+    latestPersistedClientSessionRef.current = createPersistedClientSession(clientSession);
+    persistLatestSessionPatch({
+      title: resolvedTitle,
+      readOnly: Boolean(sessionData?.read_only ?? session.readOnly),
+      error: null,
+      hint: null,
+      targetHost: resolvedTargetHost,
+      connectionName: resolvedConnectionName,
+      clientSession: latestPersistedClientSessionRef.current,
+    });
 
+    const websocketTunnelUrl = clientSession.tunnels.websocket;
     const httpTunnelUrl = clientSession.tunnels.http;
     const resumeTunnelUuid = clientSession.resume_tunnel_uuid;
+    const shouldUseHttpResume = Boolean(usingStoredTunnelResume && resumeTunnelUuid && httpTunnelUrl);
     resumeTunnelUuidRef.current = resumeTunnelUuid ?? null;
-    if (!httpTunnelUrl) {
+    if (!websocketTunnelUrl && !httpTunnelUrl) {
       connectInFlightRef.current = false;
-      debugLog("connect-missing-http-tunnel");
+      debugLog("connect-missing-tunnel");
       onUpdate({
         status: "needs_configuration",
         error: "No Guacamole tunnel endpoint is configured.",
@@ -649,9 +787,41 @@ export function GuacamoleViewport({
       return;
     }
 
-    const tunnel = new Guacamole.HTTPTunnel(httpTunnelUrl || "");
-    tunnel.receiveTimeout = 120000;
-    tunnel.unstableThreshold = 10000;
+    const configuredTunnels: Array<InstanceType<typeof Guacamole.HTTPTunnel> | InstanceType<typeof Guacamole.WebSocketTunnel>> = [];
+    if (shouldUseHttpResume && httpTunnelUrl) {
+      const httpTunnel = new Guacamole.HTTPTunnel(httpTunnelUrl);
+      httpTunnel.receiveTimeout = 120000;
+      httpTunnel.unstableThreshold = 10000;
+      configuredTunnels.push(httpTunnel);
+    } else if (websocketTunnelUrl) {
+      const websocketTunnel = new Guacamole.WebSocketTunnel(websocketTunnelUrl);
+      websocketTunnel.receiveTimeout = 120000;
+      websocketTunnel.unstableThreshold = 10000;
+      configuredTunnels.push(websocketTunnel);
+    }
+    if (httpTunnelUrl && !shouldUseHttpResume) {
+      const httpTunnel = new Guacamole.HTTPTunnel(httpTunnelUrl);
+      httpTunnel.receiveTimeout = 120000;
+      httpTunnel.unstableThreshold = 10000;
+      configuredTunnels.push(httpTunnel);
+    }
+
+    const tunnel = configuredTunnels.length === 1
+      ? configuredTunnels[0]
+      : new Guacamole.ChainedTunnel(...configuredTunnels);
+
+    debugLog("connect-tunnel-selected", {
+      websocket: websocketTunnelUrl || "<none>",
+      http: httpTunnelUrl || "<none>",
+      resumeTunnelUuid: resumeTunnelUuid ?? "<none>",
+      mode: shouldUseHttpResume
+        ? "http-resume"
+        : websocketTunnelUrl && httpTunnelUrl
+          ? "websocket+http-fallback"
+          : websocketTunnelUrl
+            ? "websocket"
+            : "http",
+    });
 
     const client = new Guacamole.Client(tunnel);
     const isCurrentConnection = () => (
@@ -742,16 +912,17 @@ export function GuacamoleViewport({
       debugLog("retry-without-resume", {
         authToken: maskDebugValue(clientSession.auth_token),
         resumeTunnelUuid,
-        nextAttempt: "fresh-session",
+        nextAttempt: attemptedStoredTunnelResume ? "backend-refresh-tunnel" : "fresh-session",
       });
       onUpdate({
-        clientSession: null,
+        clientSession: attemptedStoredTunnelResume ? latestPersistedClientSessionRef.current : null,
         status: "restarting_session",
         error: null,
         connected: false,
       });
-      forceFreshOnNextConnectRef.current = true;
-      refreshTunnelOnNextConnectRef.current = false;
+      skipStoredTunnelResumeRef.current = attemptedStoredTunnelResume;
+      forceFreshOnNextConnectRef.current = !attemptedStoredTunnelResume;
+      refreshTunnelOnNextConnectRef.current = attemptedStoredTunnelResume;
       setReconnectRequestId((current) => current + 1);
       disconnectClient({ revoke: false, disconnectTransport: true });
       return true;
@@ -768,6 +939,7 @@ export function GuacamoleViewport({
       });
       if (state === Guacamole.Client.State.CONNECTED) {
         hasConnectedRef.current = true;
+        setRequiredPrompt(null);
         captureDisplayState("connected");
         window.requestAnimationFrame(() => {
           focusRemoteDisplay();
@@ -1006,7 +1178,7 @@ export function GuacamoleViewport({
         GUAC_DPI: String(connectDpi),
         GUAC_TIMEZONE: timezone,
       });
-      if (resumeTunnelUuid) {
+      if ((shouldUseHttpResume || !websocketTunnelUrl) && resumeTunnelUuid) {
         params.set("GUAC_RESUME_TUNNEL", resumeTunnelUuid);
       }
 
@@ -1095,7 +1267,7 @@ export function GuacamoleViewport({
       return;
     }
 
-    const forceFresh = forceFreshOnNextConnectRef.current || hydratedPersistedSessionRef.current;
+    const forceFresh = forceFreshOnNextConnectRef.current;
     forceFreshOnNextConnectRef.current = false;
     hydratedPersistedSessionRef.current = false;
     void connectClient({ forceFresh });
@@ -1123,7 +1295,7 @@ export function GuacamoleViewport({
 
       pendingViewportCleanupByInstanceId.set(session.instanceId, cleanupTimerId);
     };
-  }, [disconnectClient, reconnectRequestId, session.instanceId]);
+  }, [disconnectClient, session.instanceId]);
 
   useEffect(() => {
     if (!active) {

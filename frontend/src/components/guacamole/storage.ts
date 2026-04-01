@@ -27,6 +27,14 @@ let persistedWorkspaceSessionSnapshotCache: {
   value: null,
 };
 
+function debugWorkspaceStorage(event: string, details: Record<string, unknown>): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  console.info("[GuacamoleStorage]", event, details);
+}
+
 export function getDefaultDockedWorkspaceRect(): DockedWorkspaceRect {
   return DEFAULT_DOCKED_WORKSPACE_RECT;
 }
@@ -171,7 +179,7 @@ export function loadPersistedWorkspaceSession(): WorkspaceConnection | null {
         recorded: parsed.recorded === true,
         requestedConnectionId: typeof parsed.requestedConnectionId === "string" && parsed.requestedConnectionId.trim() ? parsed.requestedConnectionId : null,
         requestedVmUsername: typeof parsed.requestedVmUsername === "string" && parsed.requestedVmUsername.trim() ? parsed.requestedVmUsername : null,
-        status: typeof parsed.status === "string" && parsed.status.trim() ? parsed.status : "queued",
+        status: hydratedClientSession ? "resuming" : typeof parsed.status === "string" && parsed.status.trim() ? parsed.status : "queued",
         error: null,
         hint: null,
         targetHost: typeof parsed.targetHost === "string" && parsed.targetHost.trim() ? parsed.targetHost : null,
@@ -183,6 +191,12 @@ export function loadPersistedWorkspaceSession(): WorkspaceConnection | null {
         clientSession: hydratedClientSession,
       },
     };
+    debugWorkspaceStorage("load-session", {
+      agentId: parsed.agentId,
+      status: persistedWorkspaceSessionSnapshotCache.value?.status,
+      hasClientSession: Boolean(hydratedClientSession),
+      source: hydratedClientSession ? "storage-reuse-candidate" : "storage-no-client-session",
+    });
     return persistedWorkspaceSessionSnapshotCache.value;
   } catch {
     persistedWorkspaceSessionSnapshotCache = {
@@ -247,6 +261,12 @@ export function persistWorkspaceSession(session: WorkspaceConnection | null): vo
     },
   };
   window.sessionStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, raw);
+  debugWorkspaceStorage("persist-session", {
+    agentId: payload.agentId,
+    status: payload.status,
+    hasClientSession: Boolean(payload.clientSession),
+    authToken: payload.clientSession?.authToken ? `${payload.clientSession.authToken.slice(0, 6)}...${payload.clientSession.authToken.slice(-6)}` : "<none>",
+  });
 }
 
 export function clearPersistedWorkspaceSession(): void {

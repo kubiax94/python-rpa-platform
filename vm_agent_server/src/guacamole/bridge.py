@@ -573,7 +573,23 @@ def _score_vm_session(session_data: dict[str, Any]) -> tuple[int, int, int, int]
 
 
 def _build_agent_group_name(agent_id: str, hostname: str, display_name: str, stored_group_name: str) -> str:
-    return stored_group_name or display_name or hostname or agent_id
+    return agent_id or stored_group_name or display_name or hostname
+
+
+def _is_reserved_windows_identity(value: Any) -> bool:
+    clean_value = _clean_string(value)
+    if not clean_value:
+        return False
+
+    normalized = clean_value.replace("/", "\\").casefold()
+    local_name = normalized.rsplit("\\", 1)[-1]
+    return normalized in {
+        "system",
+        "unknown",
+        "nt authority\\system",
+        "nt authority\\local service",
+        "nt authority\\network service",
+    } or local_name in {"system", "local service", "network service"}
 
 
 def _build_username_variants(value: Any) -> list[str]:
@@ -587,6 +603,26 @@ def _build_username_variants(value: Any) -> list[str]:
     if "@" in clean_value:
         variants = _unique_strings(*variants, clean_value.split("@", 1)[0])
     return variants
+
+
+def _display_vm_username(value: Any, *local_identifiers: Any) -> str:
+    clean_value = _clean_string(value)
+    if not clean_value:
+        return ""
+
+    local_prefixes = {
+        candidate.replace("/", "\\").casefold()
+        for candidate in (_clean_string(item) for item in local_identifiers)
+        if candidate
+    }
+
+    if "\\" in clean_value:
+        prefix, suffix = clean_value.split("\\", 1)
+        if prefix.casefold() in local_prefixes:
+            return suffix
+        return clean_value
+
+    return clean_value
 
 
 def _username_variants_match(left: Any, right: Any) -> bool:
@@ -659,9 +695,10 @@ def _build_vm_user_connection_mapping(
     session_entry: dict[str, Any],
 ) -> dict[str, Any]:
     username = _clean_string(session_entry.get("username"))
+    connection_username = _display_vm_username(username, hostname, display_name, agent_id)
     session_name = _clean_string(session_entry.get("session_name"))
     session_id = _clean_string(session_entry.get("session_id"))
-    connection_name = username or session_name or f"{display_name or hostname or agent_id} session"
+    connection_name = connection_username or session_name or f"{display_name or hostname or agent_id} session"
 
     mapping = build_agent_guacamole_mapping(
         agent_id=agent_id,
@@ -686,8 +723,8 @@ def _build_vm_user_connection_mapping(
         agent_id,
     )
     mapping["connection_candidates"] = _unique_strings(
-        *list(mapping.get("connection_candidates") or []),
         connection_name,
+        connection_username,
         username,
         session_name,
         f"{username}:{session_name}" if username and session_name else "",
@@ -794,7 +831,7 @@ def list_vm_user_sessions(
                 "group_identifier": _clean_string(base_mapping.get("group_identifier")),
                 "group_name": group_name,
                 "connection_id": "",
-                "connection_name": _clean_string(session.get("username")),
+                "connection_name": _display_vm_username(session.get("username"), hostname, display_name, agent_id),
             }
         return sessions
 
@@ -835,7 +872,7 @@ def list_vm_user_sessions(
                 "group_identifier": _clean_string(base_mapping.get("group_identifier")),
                 "group_name": _clean_string(base_mapping.get("group_name")),
                 "connection_id": _clean_string(connection_result.get("identifier")),
-                "connection_name": _clean_string(connection_result.get("name")) or _clean_string(preferred_session.get("username")),
+                "connection_name": _clean_string(connection_result.get("name")) or _display_vm_username(preferred_session.get("username"), hostname, display_name, agent_id),
             }
     except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError):
         return sessions
@@ -898,8 +935,8 @@ def _extract_guacamole_mapping(agent_id: str, agent_state: dict[str, Any] | None
         mapping["group_identifier"] = group_identifier
 
     mapping["group_candidates"] = _unique_strings(
-        *list(stored_mapping.get("group_candidates") or []),
         *list(mapping.get("group_candidates") or []),
+        *list(stored_mapping.get("group_candidates") or []),
     )
     mapping["connection_candidates"] = _unique_strings(
         *list(stored_mapping.get("connection_candidates") or []),
@@ -1381,7 +1418,7 @@ def _build_guacamole_template_values(
 def _split_guacamole_credentials(mapping: dict[str, Any]) -> tuple[str, str]:
     explicit_domain = _clean_string(mapping.get("domain"))
     username = _clean_string(mapping.get("username"))
-    if not username:
+    if not username or _is_reserved_windows_identity(username):
         return "", explicit_domain
 
     if explicit_domain:
@@ -1389,12 +1426,22 @@ def _split_guacamole_credentials(mapping: dict[str, Any]) -> tuple[str, str]:
             _, username = username.rsplit("\\", 1)
         elif "/" in username:
             _, username = username.rsplit("/", 1)
-        return _clean_string(username), explicit_domain
+        clean_username = _clean_string(username)
+        if _is_reserved_windows_identity(clean_username):
+            return "", explicit_domain
+        return clean_username, explicit_domain
 
     for separator in ("\\", "/"):
         if separator in username:
             domain, local_username = username.rsplit(separator, 1)
-            return _clean_string(local_username), _clean_string(domain)
+            clean_domain = _clean_string(domain)
+            clean_username = _clean_string(local_username)
+            if _is_reserved_windows_identity(f"{clean_domain}\\{clean_username}") or _is_reserved_windows_identity(clean_username):
+                return "", ""
+            return clean_username, clean_domain
+
+    if _is_reserved_windows_identity(username):
+        return "", ""
 
     return username, ""
 
@@ -1550,6 +1597,14 @@ def _upsert_guacamole_group(base_url: str, auth_token: str, data_source: str, ma
     group_name = _clean_string(mapping.get("group_name"))
     existing_group: dict[str, Any] = {}
 
+    def _resolve_group_after_stale_identifier() -> tuple[str, str]:
+        return _resolve_connection_group_identifier(
+            base_url,
+            auth_token,
+            data_source,
+            _unique_strings(*list(mapping.get("group_candidates") or []), group_name),
+        )
+
     if not group_id:
         group_id, resolved_name = _resolve_connection_group_identifier(
             base_url,
@@ -1561,7 +1616,19 @@ def _upsert_guacamole_group(base_url: str, auth_token: str, data_source: str, ma
             group_name = resolved_name
 
     if group_id:
-        existing_group = _request_guacamole_connection_group(base_url, auth_token, data_source, group_id)
+        try:
+            existing_group = _request_guacamole_connection_group(base_url, auth_token, data_source, group_id)
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            group_id = ""
+            existing_group = {}
+            resolved_group_id, resolved_group_name = _resolve_group_after_stale_identifier()
+            if resolved_group_id:
+                group_id = resolved_group_id
+                if resolved_group_name:
+                    group_name = resolved_group_name
+                existing_group = _request_guacamole_connection_group(base_url, auth_token, data_source, group_id)
         if _clean_string(existing_group.get("name")):
             group_name = _clean_string(existing_group.get("name"))
 
@@ -1570,14 +1637,35 @@ def _upsert_guacamole_group(base_url: str, auth_token: str, data_source: str, ma
     if group_id:
         if _group_payload_matches(payload, existing_group):
             return {"identifier": group_id, "name": group_name, "action": "reused"}
-        _request_guacamole_json_with_body(
-            base_url,
-            auth_token,
-            f"api/session/data/{quote(data_source, safe='')}/connectionGroups/{quote(group_id, safe='')}",
-            "PUT",
-            payload,
-        )
-        return {"identifier": group_id, "name": group_name, "action": "updated"}
+        try:
+            _request_guacamole_json_with_body(
+                base_url,
+                auth_token,
+                f"api/session/data/{quote(data_source, safe='')}/connectionGroups/{quote(group_id, safe='')}",
+                "PUT",
+                payload,
+            )
+            return {"identifier": group_id, "name": group_name, "action": "updated"}
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            group_id = ""
+            resolved_group_id, resolved_group_name = _resolve_group_after_stale_identifier()
+            if resolved_group_id:
+                group_id = resolved_group_id
+                if resolved_group_name:
+                    group_name = resolved_group_name
+                existing_group = _request_guacamole_connection_group(base_url, auth_token, data_source, group_id)
+                if _group_payload_matches(payload, existing_group):
+                    return {"identifier": group_id, "name": group_name, "action": "reused"}
+                _request_guacamole_json_with_body(
+                    base_url,
+                    auth_token,
+                    f"api/session/data/{quote(data_source, safe='')}/connectionGroups/{quote(group_id, safe='')}",
+                    "PUT",
+                    payload,
+                )
+                return {"identifier": group_id, "name": group_name, "action": "updated"}
 
     created = _request_guacamole_json_with_body(
         base_url,
@@ -1608,6 +1696,15 @@ def _upsert_guacamole_connection(
     existing_connection: dict[str, Any] = {}
     existing_parameters: dict[str, str] = {}
 
+    def _resolve_connection_after_stale_identifier() -> tuple[str, str]:
+        return _resolve_connection_identifier(
+            base_url,
+            auth_token,
+            data_source,
+            _unique_strings(*list(mapping.get("connection_candidates") or []), connection_name),
+            parent_identifier=parent_identifier,
+        )
+
     if not connection_id:
         connection_id, resolved_name = _resolve_connection_identifier(
             base_url,
@@ -1620,8 +1717,22 @@ def _upsert_guacamole_connection(
             connection_name = resolved_name
 
     if connection_id:
-        existing_connection = _request_guacamole_connection(base_url, auth_token, data_source, connection_id)
-        existing_parameters = _request_guacamole_connection_parameters(base_url, auth_token, data_source, connection_id)
+        try:
+            existing_connection = _request_guacamole_connection(base_url, auth_token, data_source, connection_id)
+            existing_parameters = _request_guacamole_connection_parameters(base_url, auth_token, data_source, connection_id)
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            connection_id = ""
+            existing_connection = {}
+            existing_parameters = {}
+            resolved_connection_id, resolved_connection_name = _resolve_connection_after_stale_identifier()
+            if resolved_connection_id:
+                connection_id = resolved_connection_id
+                if resolved_connection_name:
+                    connection_name = resolved_connection_name
+                existing_connection = _request_guacamole_connection(base_url, auth_token, data_source, connection_id)
+                existing_parameters = _request_guacamole_connection_parameters(base_url, auth_token, data_source, connection_id)
         if _clean_string(existing_connection.get("name")):
             connection_name = _clean_string(existing_connection.get("name"))
 
@@ -1639,14 +1750,36 @@ def _upsert_guacamole_connection(
     if connection_id:
         if _connection_payload_matches(payload, existing_connection, existing_parameters):
             return {"identifier": connection_id, "name": connection_name or payload["name"], "action": "reused"}
-        _request_guacamole_json_with_body(
-            base_url,
-            auth_token,
-            f"api/session/data/{quote(data_source, safe='')}/connections/{quote(connection_id, safe='')}",
-            "PUT",
-            payload,
-        )
-        return {"identifier": connection_id, "name": connection_name or payload["name"], "action": "updated"}
+        try:
+            _request_guacamole_json_with_body(
+                base_url,
+                auth_token,
+                f"api/session/data/{quote(data_source, safe='')}/connections/{quote(connection_id, safe='')}",
+                "PUT",
+                payload,
+            )
+            return {"identifier": connection_id, "name": connection_name or payload["name"], "action": "updated"}
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            connection_id = ""
+            resolved_connection_id, resolved_connection_name = _resolve_connection_after_stale_identifier()
+            if resolved_connection_id:
+                connection_id = resolved_connection_id
+                if resolved_connection_name:
+                    connection_name = resolved_connection_name
+                existing_connection = _request_guacamole_connection(base_url, auth_token, data_source, connection_id)
+                existing_parameters = _request_guacamole_connection_parameters(base_url, auth_token, data_source, connection_id)
+                if _connection_payload_matches(payload, existing_connection, existing_parameters):
+                    return {"identifier": connection_id, "name": connection_name or payload["name"], "action": "reused"}
+                _request_guacamole_json_with_body(
+                    base_url,
+                    auth_token,
+                    f"api/session/data/{quote(data_source, safe='')}/connections/{quote(connection_id, safe='')}",
+                    "PUT",
+                    payload,
+                )
+                return {"identifier": connection_id, "name": connection_name or payload["name"], "action": "updated"}
 
     created = _request_guacamole_json_with_body(
         base_url,
@@ -1990,15 +2123,22 @@ def _resolve_connection_group_identifier(
     if not normalized_candidates:
         return "", ""
 
+    normalized_groups: list[tuple[set[str], str, str]] = []
     for identifier, payload in decoded.items():
         clean_identifier = _clean_string(identifier)
         item = payload if isinstance(payload, dict) else {}
         item_identifier = _clean_string(item.get("identifier")) or clean_identifier
         item_name = _clean_string(item.get("name"))
-        values = {item_identifier.casefold(), item_name.casefold(), clean_identifier.casefold()}
+        normalized_groups.append((
+            {item_identifier.casefold(), item_name.casefold(), clean_identifier.casefold()},
+            item_identifier,
+            item_name,
+        ))
 
-        if any(candidate in values for candidate in normalized_candidates):
-            return item_identifier, item_name
+    for candidate in normalized_candidates:
+        for values, item_identifier, item_name in normalized_groups:
+            if candidate in values:
+                return item_identifier, item_name
 
     return "", ""
 
@@ -2018,6 +2158,7 @@ def _resolve_connection_identifier(
     if not normalized_candidates:
         return "", ""
 
+    normalized_connections: list[tuple[set[str], str, str]] = []
     for identifier, payload in decoded.items():
         clean_identifier = _clean_string(identifier)
         item = payload if isinstance(payload, dict) else {}
@@ -2026,10 +2167,16 @@ def _resolve_connection_identifier(
         item_parent_identifier = _clean_string(item.get("parentIdentifier"))
         if parent_identifier and item_parent_identifier != parent_identifier:
             continue
-        values = {item_identifier.casefold(), item_name.casefold(), clean_identifier.casefold()}
+        normalized_connections.append((
+            {item_identifier.casefold(), item_name.casefold(), clean_identifier.casefold()},
+            item_identifier,
+            item_name,
+        ))
 
-        if any(candidate in values for candidate in normalized_candidates):
-            return item_identifier, item_name
+    for candidate in normalized_candidates:
+        for values, item_identifier, item_name in normalized_connections:
+            if candidate in values:
+                return item_identifier, item_name
 
     return "", ""
 
@@ -2255,10 +2402,12 @@ def create_guacamole_client_session(
     target = _resolve_target(agent_id, agent_state)
     auth = _get_auth_config()
     warnings = list(target["warnings"])
-    target = _reconcile_provisioned_target(agent_id, target, warnings)
 
     requested_connection_id = _clean_string(connection_id)
     requested_vm_username = _clean_string(vm_username)
+    if not requested_connection_id and not requested_vm_username:
+        target = _reconcile_provisioned_target(agent_id, target, warnings)
+
     if requested_connection_id or requested_vm_username:
         try:
             session_inventory = list_vm_user_sessions(
@@ -2271,16 +2420,20 @@ def create_guacamole_client_session(
             session_inventory = []
         matched_entry = None
         requested_username_variants = {variant.casefold() for variant in _build_username_variants(requested_vm_username)}
-        for entry in session_inventory:
-            guacamole_entry = entry.get("guacamole") if isinstance(entry.get("guacamole"), dict) else {}
-            entry_connection_id = _clean_string(guacamole_entry.get("connection_id"))
-            entry_username_variants = {variant.casefold() for variant in _build_username_variants(entry.get("username"))}
-            if requested_connection_id and entry_connection_id == requested_connection_id:
-                matched_entry = entry
-                break
-            if requested_username_variants and requested_username_variants & entry_username_variants:
-                matched_entry = entry
-                break
+        if requested_username_variants:
+            for entry in session_inventory:
+                entry_username_variants = {variant.casefold() for variant in _build_username_variants(entry.get("username"))}
+                if requested_username_variants & entry_username_variants:
+                    matched_entry = entry
+                    break
+
+        if matched_entry is None and requested_connection_id:
+            for entry in session_inventory:
+                guacamole_entry = entry.get("guacamole") if isinstance(entry.get("guacamole"), dict) else {}
+                entry_connection_id = _clean_string(guacamole_entry.get("connection_id"))
+                if entry_connection_id == requested_connection_id:
+                    matched_entry = entry
+                    break
 
         if matched_entry:
             guacamole_entry = matched_entry.get("guacamole") if isinstance(matched_entry.get("guacamole"), dict) else {}
@@ -2298,7 +2451,7 @@ def create_guacamole_client_session(
             resolved_fields["guacamole_connection_name"] = _clean_string(guacamole_entry.get("connection_name")) or _clean_string(resolved_fields.get("guacamole_connection_name"))
             resolved_fields["guacamole_username"] = _clean_string(matched_entry.get("username")) or _clean_string(resolved_fields.get("guacamole_username"))
             target["resolved_fields"] = resolved_fields
-        elif requested_connection_id:
+        elif requested_connection_id and not requested_vm_username:
             target["connection_id"] = requested_connection_id
 
     if not target["enabled"] or not target["connection_id"]:

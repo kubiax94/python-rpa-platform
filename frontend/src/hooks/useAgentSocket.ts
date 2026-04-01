@@ -150,7 +150,9 @@ export function useAgentSocket(enabled = true) {
       return;
     }
 
-    const socket = new WebSocket(buildFrontendWebSocketUrl());
+    const frontendWebSocketUrl = buildFrontendWebSocketUrl();
+    console.log("[WS] Opening frontend websocket:", frontendWebSocketUrl);
+    const socket = new WebSocket(frontendWebSocketUrl);
     manualClose.current = false;
 
     socket.onopen = () => {

@@ -58,6 +58,24 @@ function UserProfileChip({ user }: { user: AuthUser | null }) {
   );
 }
 
+function isRestoringSession(session: WorkspaceConnection | null): boolean {
+  if (!session || session.connected || !session.clientSession) {
+    return false;
+  }
+
+  return ["queued", "preparing", "resuming", "credentials_submitted"].includes(session.status);
+}
+
+function getWorkspaceStatusLabel(session: WorkspaceConnection): string {
+  if (session.connected) {
+    return "Connected";
+  }
+  if (isRestoringSession(session)) {
+    return "Restoring session";
+  }
+  return session.status;
+}
+
 export function GlobalGuacamoleWorkspace({
   session,
   onUpdate,
@@ -391,6 +409,7 @@ export function GlobalGuacamoleWorkspace({
       ? "fixed -left-[200vw] top-0 h-px w-px overflow-hidden"
       : "fixed z-40 flex flex-col overflow-hidden rounded-2xl border border-slate-700/80 bg-slate-950/97 shadow-[0_24px_90px_rgba(2,6,23,0.72)] backdrop-blur";
   const shouldAllowReconnect = session.status !== "session_closed";
+  const restoringSession = isRestoringSession(session);
   const headerClassName = session.fullscreen
     ? `absolute inset-x-0 top-0 z-30 flex items-center justify-between gap-3 border-b border-slate-700/70 bg-slate-900/88 px-4 py-3 transition-all duration-200 ${fullscreenChromeVisible ? "translate-y-0 opacity-100" : "-translate-y-full opacity-0 pointer-events-none"}`
     : "flex items-center justify-between gap-3 border-b border-slate-700/70 bg-slate-900/88 px-4 py-3";
@@ -439,7 +458,7 @@ export function GlobalGuacamoleWorkspace({
                 <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2 py-0.5 text-cyan-200">
                   {session.agentId}
                 </span>
-                <span>{session.connected ? "Connected" : session.status}</span>
+                <span>{getWorkspaceStatusLabel(session)}</span>
                 <span>{session.fullscreen ? "Fullscreen" : "Docked workspace"}</span>
                 {session.recorded && (
                   <span className="rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-amber-200">
@@ -490,7 +509,7 @@ export function GlobalGuacamoleWorkspace({
           {!session.connected && (
             <div className="absolute inset-0 flex items-center justify-center bg-slate-950/55">
               <div className="pointer-events-auto max-w-[min(92%,34rem)] rounded-md border border-slate-700 bg-slate-900/90 px-4 py-3 text-xs text-slate-300 shadow-2xl">
-                <p className="font-medium text-slate-100">{session.error || session.status || "Connecting"}</p>
+                <p className="font-medium text-slate-100">{session.error || getWorkspaceStatusLabel(session) || "Connecting"}</p>
                 {session.hint && <p className="mt-2 text-slate-300/90">{session.hint}</p>}
                 {(session.targetHost || session.connectionName) && (
                   <div className="mt-3 space-y-1 text-[11px] text-slate-400">
@@ -498,8 +517,11 @@ export function GlobalGuacamoleWorkspace({
                     {session.connectionName && <p>Guacamole connection: {session.connectionName}</p>}
                   </div>
                 )}
+                {restoringSession && !session.error && (
+                  <p className="mt-2 text-slate-400">Refreshing the page closed the old browser socket. Reattaching to the saved session.</p>
+                )}
                 <div className="mt-4 flex items-center justify-end gap-2">
-                  {shouldAllowReconnect ? (
+                  {shouldAllowReconnect && !restoringSession ? (
                     <button
                       onClick={onReconnect}
                       className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-200 hover:border-cyan-400"
@@ -515,7 +537,7 @@ export function GlobalGuacamoleWorkspace({
         {!session.fullscreen && (
           <div className="flex items-center justify-between gap-3 border-t border-slate-800 bg-slate-950/95 px-4 py-2 text-[11px] text-slate-500">
             <span>Docked global workspace · drag the header to move, top or left edge to resize</span>
-            <span>{session.minimized ? "Minimized" : session.readOnly ? "Read-only view" : session.connected ? "Ready for input" : "Connecting"}</span>
+            <span>{session.minimized ? "Minimized" : session.readOnly ? "Read-only view" : session.connected ? "Ready for input" : restoringSession ? "Restoring session" : "Connecting"}</span>
           </div>
         )}
       </div>
@@ -527,7 +549,7 @@ export function GlobalGuacamoleWorkspace({
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-slate-100">{session.title}</p>
                 <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-                  <span>{session.connected ? "Connected" : session.status}</span>
+                  <span>{getWorkspaceStatusLabel(session)}</span>
                   {session.recorded && (
                     <span className="rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-amber-200">
                       Recorded
