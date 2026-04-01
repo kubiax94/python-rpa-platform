@@ -95,6 +95,7 @@ class GuacamoleService:
         self._get_guacamole_base_url = get_guacamole_base_url
         self._rdp_monitor = rdp_monitor or RdpMonitorService()
         self._agent_tokens: dict[str, set[str]] = {}
+        self._auth_cookies_by_auth_token: dict[str, str] = {}
         self._http_tunnel_tokens: dict[str, str] = {}
         self._http_tunnel_cookies: dict[str, str] = {}
         self._websocket_proxy_supported: bool | None = None
@@ -378,6 +379,7 @@ class GuacamoleService:
                     username=requested_username or existing.username,
                     owner=tracked_owner,
                 )
+                existing_auth_cookie = self._auth_cookies_by_auth_token.get(existing.auth_token, "")
                 resume_tunnel_uuid = ""
                 if should_prepare_http_resume and refresh_tunnel:
                     released_tunnels = self._forget_http_tunnels_for_auth_token(existing.auth_token)
@@ -420,6 +422,7 @@ class GuacamoleService:
                     "tunnels": proxy_tunnels,
                     "client_session": {
                         "auth_token": existing.auth_token,
+                        "auth_cookie_header": existing_auth_cookie,
                         "data_source": existing.data_source,
                         "connection_id": existing.connection_id,
                         "connection_type": "c",
@@ -451,6 +454,9 @@ class GuacamoleService:
             recording_entry = session.get("recording_entry") if isinstance(session.get("recording_entry"), dict) else None
             auth_token = _clean_string(next_client_session.get("auth_token"))
             if auth_token:
+                auth_cookie_header = _clean_string(next_client_session.get("auth_cookie_header"))
+                if auth_cookie_header:
+                    self._auth_cookies_by_auth_token[auth_token] = auth_cookie_header
                 self._agent_tokens.setdefault(agent_id, set()).add(auth_token)
                 self._rdp_monitor.register_session(
                     agent_id=agent_id,
@@ -684,26 +690,17 @@ class GuacamoleService:
         if not base_url:
             return JSONResponse({"error": "Guacamole bridge is not configured"}, status_code=503)
 
+        requested_resume_tunnel_uuid = ""
         if raw_query == "connect":
-            resume_tunnel_uuid = self._extract_resume_tunnel_uuid(body)
-            if resume_tunnel_uuid:
-                stored_tunnel_token = self._http_tunnel_tokens.get(resume_tunnel_uuid, "")
-                if stored_tunnel_token:
-                    logger.info(
-                        "Resuming Guacamole HTTP tunnel uuid=%s tunnel_token=%s",
-                        resume_tunnel_uuid,
-                        _format_token_marker(stored_tunnel_token),
-                    )
-                    self._rdp_monitor.touch_tunnel(resume_tunnel_uuid)
-                    return Response(
-                        content=resume_tunnel_uuid,
-                        status_code=200,
-                        headers={
-                            "Guacamole-Tunnel-Token": stored_tunnel_token,
-                            "Cache-Control": "no-cache",
-                        },
-                        media_type="text/plain",
-                    )
+            requested_resume_tunnel_uuid = self._extract_resume_tunnel_uuid(body)
+            if requested_resume_tunnel_uuid:
+                logger.info(
+                    "Forwarding Guacamole HTTP tunnel resume connect uuid=%s tunnel_token=%s cookie_present=%s",
+                    requested_resume_tunnel_uuid,
+                    _format_token_marker(self._http_tunnel_tokens.get(requested_resume_tunnel_uuid, "")),
+                    bool(self._http_tunnel_cookies.get(requested_resume_tunnel_uuid, "")),
+                )
+                self._rdp_monitor.touch_tunnel(requested_resume_tunnel_uuid)
 
         upstream_url = f"{base_url}/tunnel"
         if raw_query:
@@ -712,6 +709,7 @@ class GuacamoleService:
         tunnel_uuid = self._extract_tunnel_uuid(raw_query)
         if tunnel_uuid:
             self._rdp_monitor.touch_tunnel(tunnel_uuid)
+        tunnel_header_uuid = tunnel_uuid or requested_resume_tunnel_uuid
 
         request_headers = {
             "Accept": headers.get("accept") or "*/*",
@@ -720,10 +718,11 @@ class GuacamoleService:
         if content_type:
             request_headers["Content-Type"] = content_type
 
-        tunnel_token = headers.get("guacamole-tunnel-token") or self._http_tunnel_tokens.get(tunnel_uuid, "")
+        tunnel_token = headers.get("guacamole-tunnel-token") or self._http_tunnel_tokens.get(tunnel_header_uuid, "")
         # For resumed Guacamole tunnels prefer the cookie captured when the tunnel was opened.
         # Browser cookies for the app origin are unrelated and can break upstream tunnel resume.
-        tunnel_cookie = self._http_tunnel_cookies.get(tunnel_uuid, "") or headers.get("cookie") or ""
+        auth_cookie = self._auth_cookies_by_auth_token.get(auth_token, "") if auth_token else ""
+        tunnel_cookie = self._http_tunnel_cookies.get(tunnel_header_uuid, "") or auth_cookie or headers.get("cookie") or ""
         if tunnel_token:
             request_headers["Guacamole-Tunnel-Token"] = tunnel_token
         if tunnel_cookie:
@@ -865,6 +864,7 @@ class GuacamoleService:
         self._remember_close_reason(clean_auth_token, close_reason)
 
         tracked_session = self._rdp_monitor.remove_session(clean_auth_token)
+        self._auth_cookies_by_auth_token.pop(clean_auth_token, None)
         if tracked_session is not None:
             for tunnel_uuid in list(tracked_session.tunnel_uuids):
                 self._http_tunnel_tokens.pop(tunnel_uuid, None)
@@ -949,6 +949,7 @@ class GuacamoleService:
             headers={
                 "Accept": "*/*",
                 "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                **({"Cookie": self._auth_cookies_by_auth_token.get(auth_token, "")} if self._auth_cookies_by_auth_token.get(auth_token, "") else {}),
             },
             method="POST",
         )

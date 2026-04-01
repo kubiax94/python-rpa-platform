@@ -1,18 +1,20 @@
 import asyncio
 import logging
-import os
 from uuid import uuid4
 from pyee import EventEmitter
-from shared.core.event_handler import EventHandler
 from shared.core.iprocesable import IProcesable
 from shared.network.events.example_event import HandshakeData, HandshakeEvent
 from shared.protocol.network_event import NetworkEvent
 from shared.protocol.session import Session
+from vm_agent.src.agents.command_handler import AgentCommandHandler
+from vm_agent.src.agents.lifecycle_handler import AgentLifecycleHandler
 from vm_agent.src.core.ievent_aware import IEventAware
+from vm_agent.src.network.context import AgentSessionContext
 from vm_agent.src.network.agent_connection import AgentConnection, AgentConnectionStatus
 from vm_agent.src.network.agent_session import AgentSession
 from vm_agent.src.network.event_router import EventRouter
-from vm_agent.src.network.network_event_handler import NetworkEventHandler
+from vm_agent.src.process_monitoring.network_handler import ProcessMonitoringHandler
+from vm_agent.src.tasks.network_handler import AgentTaskHandler
 
 
 class AgentClient(IProcesable, IEventAware):
@@ -21,7 +23,10 @@ class AgentClient(IProcesable, IEventAware):
         self.init = False
         self._connection: AgentConnection = None
         self._session: Session = None
-        self._handler: EventHandler = None
+        self._lifecycle_handler: AgentLifecycleHandler | None = None
+        self._command_handler: AgentCommandHandler | None = None
+        self._task_handler: AgentTaskHandler | None = None
+        self._process_monitoring_handler: ProcessMonitoringHandler | None = None
         self._agent_session: AgentSession | None = None
         self.client_id: str = uuid4().hex
         self._connection_manager_task: asyncio.Task = None
@@ -38,9 +43,15 @@ class AgentClient(IProcesable, IEventAware):
             self.client_id = configured_client_id
 
         self._connection = AgentConnection(config=config)
-        self._handler = NetworkEventHandler(bus)
+        self._lifecycle_handler = AgentLifecycleHandler(bus)
+        self._command_handler = AgentCommandHandler(bus)
+        self._task_handler = AgentTaskHandler(bus)
+        self._process_monitoring_handler = ProcessMonitoringHandler(bus)
         router = EventRouter()
-        router.register(self._handler.event_types, self._handler.handle_event)
+        router.register(self._lifecycle_handler.event_types, self._lifecycle_handler.handle_event)
+        router.register(self._command_handler.event_types, self._command_handler.handle_event)
+        router.register(self._task_handler.event_types, self._task_handler.handle_event)
+        router.register(self._process_monitoring_handler.event_types, self._process_monitoring_handler.handle_event)
         self._agent_session = AgentSession(router, logger=logging.getLogger(__name__))
 
         self._connection_manager_task = asyncio.create_task(self.connection_manager(self._connection, self, bus))
@@ -62,17 +73,12 @@ class AgentClient(IProcesable, IEventAware):
         return None
 
     async def connection_manager(self, agent_connection, client, bus):
-        handshake_registered = False
         while True:
             try:
+                self.init = False
                 await agent_connection.open(client)
 
-                if not handshake_registered:
-                    bus.once("handshake", client._handshake_handler)
-                    handshake_registered = True
-
                 await agent_connection._read_loop_task
-                handshake_registered = False
                 if agent_connection.get_status() == AgentConnectionStatus.STOP:
                     self._fatal_error_reason = agent_connection.get_fatal_error_reason()
                     logging.error(f"Stopping connection manager due to fatal connection error: {self._fatal_error_reason}")
@@ -113,18 +119,19 @@ class AgentClient(IProcesable, IEventAware):
         except RuntimeError as e:
             logging.error(f"No running event loop: {e}")
 
-    def _handshake_handler(self, eventData: HandshakeEvent):
-        logging.info(f"Handshake received: {eventData}")
-        self.init = True
-        self.send_event(HandshakeEvent(data=HandshakeData(
-            client_id=self.client_id,
-            hostname=str(os.getenv("COMPUTERNAME") or ""),
-            capabilities=["ws"]
-        )))
-
     async def process(self, event):
         if self._agent_session is None:
             raise RuntimeError("Agent session is not initialized")
 
-        await self._agent_session.process(event, self._connection)
+        context = AgentSessionContext(
+            connection=self._connection,
+            client_id=self.client_id,
+            initialized=self.init,
+            send_event=self.send_event,
+            set_initialized=self._set_initialized,
+        )
+        await self._agent_session.process(event, context)
+
+    def _set_initialized(self, value: bool):
+        self.init = value
 

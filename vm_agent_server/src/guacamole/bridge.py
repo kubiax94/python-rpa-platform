@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from http.cookies import SimpleCookie
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,30 @@ def _join_url(base_url: str, suffix: str) -> str:
     if not base_url:
         return ""
     return f"{base_url.rstrip('/')}/{suffix.lstrip('/')}"
+
+
+def _extract_cookie_header(headers: Any) -> str:
+    raw_cookie_headers: list[str] = []
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        raw_cookie_headers = get_all("Set-Cookie") or []
+
+    if not raw_cookie_headers:
+        single_cookie = headers.get("Set-Cookie")
+        if single_cookie:
+            raw_cookie_headers = [single_cookie]
+
+    if not raw_cookie_headers:
+        return ""
+
+    cookie = SimpleCookie()
+    for raw_cookie in raw_cookie_headers:
+        try:
+            cookie.load(raw_cookie)
+        except Exception:
+            continue
+
+    return "; ".join(f"{morsel.key}={morsel.value}" for morsel in cookie.values())
 
 
 def _replace_url_hostname(url: str, hostname: str) -> str:
@@ -1129,7 +1154,10 @@ def _request_guacamole_token(base_url: str, username: str, password: str) -> dic
     )
 
     with urlopen(request, timeout=10) as response:
-        return json.loads(response.read().decode("utf-8"))
+        decoded = json.loads(response.read().decode("utf-8"))
+        if isinstance(decoded, dict):
+            decoded["cookie_header"] = _extract_cookie_header(response.headers)
+        return decoded
 
 
 def _request_guacamole_connections(base_url: str, auth_token: str, data_source: str) -> dict[str, Any]:
@@ -2219,6 +2247,7 @@ def provision_guacamole_agent_target_with_diagnostics(
 
     auth_response = _request_guacamole_token(config["request_base_url"], auth["username"], auth["password"])
     auth_token = _clean_string(auth_response.get("authToken"))
+    auth_cookie_header = _clean_string(auth_response.get("cookie_header"))
     data_source = _clean_string(auth_response.get("dataSource")) or auth["provider"] or "default"
     if not auth_token:
         raise RuntimeError("Guacamole auto provisioning could not obtain an auth token.")
@@ -2499,6 +2528,7 @@ def create_guacamole_client_session(
         }
 
     auth_token = _clean_string(auth_response.get("authToken"))
+    auth_cookie_header = _clean_string(auth_response.get("cookie_header"))
     data_source = _clean_string(auth_response.get("dataSource")) or auth["provider"] or "default"
     mapping = target.get("guacamole_mapping") if isinstance(target.get("guacamole_mapping"), dict) else {}
     recording = target.get("recording") if isinstance(target.get("recording"), dict) else {}
@@ -2641,6 +2671,7 @@ def create_guacamole_client_session(
         "tunnels": tunnel_urls or target["tunnels"],
         "client_session": {
             "auth_token": auth_token,
+            "auth_cookie_header": auth_cookie_header,
             "data_source": data_source,
             "connection_id": resolved_connection_id,
             "connection_type": auth["connection_type"],
