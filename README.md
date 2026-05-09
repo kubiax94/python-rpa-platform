@@ -1,4 +1,5 @@
 # my-orciestra
+<img width="1858" height="923" alt="image" src="https://github.com/user-attachments/assets/41260886-ea98-49e7-a97c-8225f59fe3dc" />
 
 Monorepo for orchestrating Windows VM agents from a FastAPI control plane with a Next.js frontend and optional Apache Guacamole remote access.
 
