@@ -41,6 +41,7 @@ services:
 
   guac-init:
     image: guacamole/guacamole:1.5.5
+    user: "0:0"
     command:
       - /bin/sh
       - -c
