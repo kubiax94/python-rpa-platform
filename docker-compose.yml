@@ -47,7 +47,7 @@ services:
       - /opt/guacamole/bin/initdb.sh --postgresql > /initdb/001-guacamole-schema.sql
     restart: "no"
     volumes:
-      - ./docker-data/guacamole/init:/initdb
+      - guac_init:/initdb
 
   guacdb:
     image: postgres:16-alpine
@@ -66,7 +66,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./docker-data/guacamole/db:/var/lib/postgresql/data
-      - ./docker-data/guacamole/init:/docker-entrypoint-initdb.d:ro
+      - guac_init:/docker-entrypoint-initdb.d:ro
 
   guacd:
     image: guacamole/guacd:1.5.5
@@ -92,3 +92,6 @@ services:
     volumes:
       - ./docker-data/guacamole/drive:/drive
       - ./docker-data/guacamole/recordings:/recordings
+
+volumes:
+  guac_init:
