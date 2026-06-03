@@ -1,6 +1,10 @@
 # add_trusted_rdp_host.py
-import winreg
 import logging
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - only used on non-Windows hosts
+    winreg = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -10,6 +14,10 @@ def add_trusted_rdp_host(hostname):
     Dodaje host do zaufanych RDP hosts.
     Windows nie będzie pytał o certyfikat.
     """
+    if winreg is None:
+        logger.info("Skipping trusted RDP host update for %s because winreg is unavailable on this platform", hostname)
+        return False
+
     try:
         logger.info(f"Adding {hostname} to trusted RDP hosts...")
         
@@ -56,6 +64,10 @@ def disable_rdp_publisher_warning():
     Wyłącz ostrzeżenie o nieznanym wydawcy RDP.
     Windows nie będzie pytał przy otwieraniu plików .rdp
     """
+    if winreg is None:
+        logger.info("Skipping RDP publisher warning update because winreg is unavailable on this platform")
+        return False
+
     try:
         logger.info("Disabling RDP publisher warnings...")
         

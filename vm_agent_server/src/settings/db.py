@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 
 import aiosqlite
@@ -10,7 +11,7 @@ from vm_agent_server.src.settings.models import ServerSettings
 
 logger = logging.getLogger(__name__)
 
-SERVER_SETTINGS_DB_PATH = "server_settings.db"
+SERVER_SETTINGS_DB_PATH = os.getenv("VM_AGENT_SERVER_SETTINGS_DB_PATH", "server_settings.db")
 SERVER_SETTINGS_ROW_ID = "server-settings"
 
 SCHEMA = """

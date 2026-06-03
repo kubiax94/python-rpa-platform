@@ -29,8 +29,8 @@ from vm_agent_server.src.tasks.models import TASK_KIND_AGENT, TaskComponent, Tas
 
 logger = logging.getLogger(__name__)
 
-TASK_DB_PATH = "tasks.db"
-TASK_LOGS_DIR = "logs/tasks"
+TASK_DB_PATH = os.getenv("VM_AGENT_TASK_DB_PATH", "tasks.db")
+TASK_LOGS_DIR = os.getenv("VM_AGENT_TASK_LOGS_DIR", "logs/tasks")
 
 TASK_SCHEMA = """
 -- Task definitions / runs

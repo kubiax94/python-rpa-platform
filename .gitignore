@@ -45,6 +45,7 @@ build/
 dist/
 logs/
 *.log
+docker-data/
 agents.db
 agents.db-shm
 agents.db-wal

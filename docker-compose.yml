@@ -1,0 +1,94 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        REPO_URL: ${APP_REPO_URL:-https://github.com/kubiax94/python-rpa-platform.git}
+        REPO_REF: ${APP_REPO_REF:-}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+      args:
+        REPO_URL: ${APP_REPO_URL:-https://github.com/kubiax94/python-rpa-platform.git}
+        REPO_REF: ${APP_REPO_REF:-}
+    depends_on:
+      guacamole:
+        condition: service_started
+    environment:
+      GUACAMOLE_ALLOW_EMBED: "true"
+      GUACAMOLE_AUTH_PASSWORD: ${GUACAMOLE_AUTH_PASSWORD:-guacadmin}
+      GUACAMOLE_AUTH_PROVIDER: ${GUACAMOLE_AUTH_PROVIDER:-postgresql}
+      GUACAMOLE_AUTH_USERNAME: ${GUACAMOLE_AUTH_USERNAME:-guacadmin}
+      GUACAMOLE_BASE_URL: http://guacamole:8080/guacamole
+      GUACAMOLE_SERVER_BASE_URL: http://guacamole:8080/guacamole
+      VM_AGENT_AGENT_REGISTRY_DB_PATH: /data/agents.db
+      VM_AGENT_SERVER_PUBLIC_URL: ${VM_AGENT_SERVER_PUBLIC_URL:-http://localhost:8765}
+      VM_AGENT_SERVER_SETTINGS_DB_PATH: /data/server_settings.db
+      VM_AGENT_TASK_DB_PATH: /data/tasks.db
+      VM_AGENT_TASK_LOGS_DIR: /data/logs/tasks
+      VM_AGENT_TELEMETRY_DB_PATH: /data/telemetry.db
+    ports:
+      - "${BACKEND_PORT:-8765}:8765"
+    restart: unless-stopped
+    volumes:
+      - ./docker-data/backend:/data
+
+  guac-init:
+    image: guacamole/guacamole:1.5.5
+    command:
+      - /bin/sh
+      - -c
+      - /opt/guacamole/bin/initdb.sh --postgresql > /initdb/001-guacamole-schema.sql
+    restart: "no"
+    volumes:
+      - ./docker-data/guacamole/init:/initdb
+
+  guacdb:
+    image: postgres:16-alpine
+    depends_on:
+      guac-init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_DB: ${GUACAMOLE_DB_NAME:-guacamole_db}
+      POSTGRES_PASSWORD: ${GUACAMOLE_DB_PASSWORD:-guacamole_password}
+      POSTGRES_USER: ${GUACAMOLE_DB_USER:-guacamole_user}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    volumes:
+      - ./docker-data/guacamole/db:/var/lib/postgresql/data
+      - ./docker-data/guacamole/init:/docker-entrypoint-initdb.d:ro
+
+  guacd:
+    image: guacamole/guacd:1.5.5
+    restart: unless-stopped
+
+  guacamole:
+    image: guacamole/guacamole:1.5.5
+    depends_on:
+      guacd:
+        condition: service_started
+      guacdb:
+        condition: service_healthy
+    environment:
+      GUACD_HOSTNAME: guacd
+      POSTGRESQL_DATABASE: ${GUACAMOLE_DB_NAME:-guacamole_db}
+      POSTGRESQL_HOSTNAME: guacdb
+      POSTGRESQL_PASSWORD: ${GUACAMOLE_DB_PASSWORD:-guacamole_password}
+      POSTGRESQL_USER: ${GUACAMOLE_DB_USER:-guacamole_user}
+      WEBAPP_CONTEXT: guacamole
+    ports:
+      - "${GUACAMOLE_PORT:-8080}:8080"
+    restart: unless-stopped
+    volumes:
+      - ./docker-data/guacamole/drive:/drive
+      - ./docker-data/guacamole/recordings:/recordings

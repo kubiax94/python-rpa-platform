@@ -16,7 +16,7 @@ from vm_agent_server.src.agent_auth import issue_agent_access_token, verify_agen
 logger = logging.getLogger(__name__)
 BOOTSTRAP_RECOVERY_WINDOW_SECONDS = int(os.getenv("VM_AGENT_BOOTSTRAP_RECOVERY_WINDOW_SECONDS", str(24 * 60 * 60)))
 
-AGENT_REGISTRY_DB_PATH = "agents.db"
+AGENT_REGISTRY_DB_PATH = os.getenv("VM_AGENT_AGENT_REGISTRY_DB_PATH", "agents.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (

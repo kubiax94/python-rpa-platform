@@ -15,6 +15,7 @@ Retention:
 import time
 import asyncio
 import logging
+import os
 from collections import defaultdict
 from typing import Optional
 
@@ -22,7 +23,7 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "telemetry.db"
+DB_PATH = os.getenv("VM_AGENT_TELEMETRY_DB_PATH", "telemetry.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS metrics (
