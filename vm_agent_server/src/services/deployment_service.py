@@ -33,6 +33,19 @@ DEFAULT_RELEASE_ASSET_NAME = "agent_service.exe"
 DEFAULT_RELEASE_CHECKSUM_NAME = "agent_service.exe.sha256"
 
 
+def _normalize_hostname_value(value: str) -> tuple[str, str]:
+    cleaned = value.strip().rstrip(".").lower()
+    short_name = cleaned.split(".", 1)[0] if cleaned else ""
+    return cleaned, short_name
+
+
+def _resolve_bootstrap_hostnames(hostname: str) -> tuple[str, str]:
+    full_name, short_name = _normalize_hostname_value(hostname)
+    if "." in full_name:
+        return hostname.strip(), short_name
+    return "", hostname.strip()
+
+
 class DeploymentService:
     def __init__(
         self,
@@ -593,9 +606,11 @@ class DeploymentService:
                 build_log_parts.append(f"Downloaded SHA256: {downloaded_sha256}")
 
             bootstrap_path = package_dir / "agent.bootstrap.json"
+            bootstrap_fqdn, bootstrap_hostname = _resolve_bootstrap_hostnames(hostname)
             bootstrap_payload = {
                 "agent_id": agent_id,
-                "hostname": hostname,
+                "hostname": bootstrap_hostname or hostname,
+                "fqdn": bootstrap_fqdn,
                 "display_name": display_name,
                 "guacamole": guacamole_mapping,
                 "server_url": server_ws_url,
@@ -866,11 +881,39 @@ class DeploymentService:
             }}
 
             $BootstrapMetadata = Get-BootstrapMetadata -PackageRoot $PackageRoot
-            if ($BootstrapMetadata -and $BootstrapMetadata.hostname) {{
+            if ($BootstrapMetadata -and ($BootstrapMetadata.hostname -or $BootstrapMetadata.fqdn)) {{
                 $expectedHostname = [string]$BootstrapMetadata.hostname
+                $expectedFqdn = [string]$BootstrapMetadata.fqdn
                 $localHostname = [string]$env:COMPUTERNAME
-                if ($expectedHostname -and $localHostname -and $expectedHostname.ToLowerInvariant() -ne $localHostname.ToLowerInvariant()) {{
-                    throw "Bootstrap package is bound to host '$expectedHostname', but this machine is '$localHostname'. Copy the package to the intended VM or prepare a deployment for this host."
+                $localFqdn = ""
+                try {{
+                    $localFqdn = [string][System.Net.Dns]::GetHostEntry('localhost').HostName
+                }} catch {{
+                    $localFqdn = ""
+                }}
+                $expectedHostCandidate = if (-not [string]::IsNullOrWhiteSpace($expectedFqdn)) {{ $expectedFqdn }} else {{ $expectedHostname }}
+                $expectedHostnameNormalized = $expectedHostCandidate.Trim().TrimEnd('.').ToLowerInvariant()
+                $expectedHostnameShort = if ($expectedHostnameNormalized.Contains('.')) {{ $expectedHostnameNormalized.Split('.', 2)[0] }} else {{ $expectedHostnameNormalized }}
+                $matchesHost = $false
+                foreach ($candidate in @($localHostname, $localFqdn)) {{
+                    if ([string]::IsNullOrWhiteSpace($candidate)) {{
+                        continue
+                    }}
+                    $candidateNormalized = $candidate.Trim().TrimEnd('.').ToLowerInvariant()
+                    $candidateShort = if ($candidateNormalized.Contains('.')) {{ $candidateNormalized.Split('.', 2)[0] }} else {{ $candidateNormalized }}
+                    if (
+                        $expectedHostnameNormalized -eq $candidateNormalized -or
+                        $expectedHostnameNormalized -eq $candidateShort -or
+                        $expectedHostnameShort -eq $candidateNormalized -or
+                        $expectedHostnameShort -eq $candidateShort
+                    ) {{
+                        $matchesHost = $true
+                        break
+                    }}
+                }}
+                if (-not $matchesHost) {{
+                    $localHostDisplay = if (-not [string]::IsNullOrWhiteSpace($localFqdn)) {{ $localFqdn }} else {{ $localHostname }}
+                    throw "Bootstrap package is bound to host '$expectedHostCandidate', but this machine is '$localHostDisplay'. Copy the package to the intended VM or prepare a deployment for this host."
                 }}
             }}
 

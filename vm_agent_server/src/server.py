@@ -6,7 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from http.cookies import SimpleCookie
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
@@ -571,6 +571,14 @@ def _resolve_agent_ws_url(request: Request) -> str:
     override = os.getenv("VM_AGENT_SERVER_WS_URL")
     if override:
         return override
+
+    public_base_url = os.getenv("VM_AGENT_SERVER_PUBLIC_URL", "").strip().rstrip("/")
+    if public_base_url:
+        parsed = urlsplit(public_base_url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+            return urlunsplit((ws_scheme, parsed.netloc, "/ws", "", ""))
+
     scheme = "wss" if request.url.scheme == "https" else "ws"
     port = request.url.port or (443 if request.url.scheme == "https" else 80)
     return f"{scheme}://{request.url.hostname}:{port}/ws"
