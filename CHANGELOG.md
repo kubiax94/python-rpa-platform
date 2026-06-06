@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.2](https://github.com/kubiax94/python-rpa-platform/compare/v0.4.1...v0.4.2) (2026-06-06)
+
+
+### Bug Fixes
+
+* **agent:** added FQDN and hostname normalization ([7fe1949](https://github.com/kubiax94/python-rpa-platform/commit/7fe1949eb9cf68be2b3df52e30d4e2c4ce419de1))
+* **server:** added FQDN and hostname normalization ([603e944](https://github.com/kubiax94/python-rpa-platform/commit/603e944278be2212570d33c5f50c53a8a455785c))
+
 ## [0.4.1](https://github.com/kubiax94/python-rpa-platform/compare/v0.4.0...v0.4.1) (2026-06-06)
 
 
