@@ -14,9 +14,23 @@ jobs:
     runs-on: windows
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Run release-please
+        id: release
         uses: googleapis/release-please-action@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: .release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      - name: Rewrite release notes by area
+        if: steps.release.outputs.release_created == 'true'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG_NAME: ${{ steps.release.outputs.tag_name }}
+        run: |
+          py -3 scripts/generate_release_changelog.py
