@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
 import { useGuacamoleWorkspace } from "@/components/GuacamoleWorkspace";
 import { useAgentSocket } from "@/hooks/useAgentSocket";
@@ -39,43 +40,85 @@ function AuthScreen({
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,#164e63_0%,#0f172a_38%,#020617_100%)] px-6 py-10">
-      <div className="grid w-full max-w-5xl gap-8 lg:grid-cols-[1.1fr_0.9fr]">
-        <section className="rounded-[32px] border border-cyan-500/15 bg-slate-950/75 p-8 shadow-[0_32px_120px_rgba(2,6,23,0.48)]">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-cyan-300">Identity</p>
-          <h1 className="mt-4 text-4xl font-semibold text-slate-50">My Orciestra Access</h1>
-          <p className="mt-4 max-w-xl text-sm leading-6 text-slate-400">
-            Serwer teraz używa warstwy użytkownika. Na pierwszym uruchomieniu możesz wejść lokalnym adminem z ENV i skonfigurować Azure SSO. Po aktywacji Microsoft Entra lokalny bootstrap przestaje działać.
-          </p>
-          <div className="mt-8 grid gap-4 md:grid-cols-3">
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Bootstrap</p>
-              <p className="mt-3 text-lg font-semibold text-slate-100">ENV only</p>
-              <p className="mt-2 text-xs text-slate-400">Lokalny admin nie trafia do bazy. Jest odczytywany wyłącznie z procesu serwera.</p>
+    <main className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,#155e75_0%,#0f172a_42%,#020617_100%)] px-6 py-10">
+      <div className="grid w-full max-w-6xl gap-8 xl:grid-cols-[1.15fr_0.85fr]">
+        <section className="relative overflow-hidden rounded-[36px] border border-cyan-500/15 bg-slate-950/70 p-8 shadow-[0_32px_120px_rgba(2,6,23,0.48)]">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(34,211,238,0.18),transparent_32%),radial-gradient(circle_at_80%_30%,rgba(14,165,233,0.16),transparent_28%),radial-gradient(circle_at_50%_85%,rgba(56,189,248,0.14),transparent_30%)]" />
+          <div className="relative flex h-full flex-col justify-between gap-10">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-cyan-300">My Orciestra</p>
+              <h1 className="mt-4 max-w-xl text-4xl font-semibold leading-tight text-slate-50 xl:text-5xl">
+                Control your VM fleet from one clean workspace.
+              </h1>
+              <p className="mt-4 max-w-lg text-sm leading-6 text-slate-300/80">
+                Sign in to access agents, deployments, remote sessions, and operator tooling.
+              </p>
             </div>
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">SSO Lock</p>
-              <p className="mt-3 text-lg font-semibold text-slate-100">One-way</p>
-              <p className="mt-2 text-xs text-slate-400">Po aktywacji provider jest blokowany i nie da się wrócić do lokalnego modelu.</p>
-            </div>
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Role Mapping</p>
-              <p className="mt-3 text-lg font-semibold text-slate-100">Azure Groups</p>
-              <p className="mt-2 text-xs text-slate-400">Role aplikacji będą nadawane automatycznie na podstawie mapowania grup Entra do ról appki.</p>
+
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1.05fr)_minmax(260px,0.95fr)] lg:items-end">
+              <div className="relative overflow-hidden rounded-[28px] border border-white/10 bg-slate-900/60 p-5 backdrop-blur-sm">
+                <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-300/60 to-transparent" />
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Agents</p>
+                    <p className="mt-3 text-2xl font-semibold text-slate-100">Live</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Deployments</p>
+                    <p className="mt-3 text-2xl font-semibold text-slate-100">Release</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Remote</p>
+                    <p className="mt-3 text-2xl font-semibold text-slate-100">RDP</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="relative mx-auto flex aspect-[4/5] w-full max-w-sm items-center justify-center overflow-hidden rounded-[32px] border border-cyan-400/20 bg-gradient-to-b from-slate-900 via-slate-950 to-cyan-950/40 p-8">
+                <div className="absolute -left-10 top-10 h-28 w-28 rounded-full bg-cyan-400/20 blur-3xl" />
+                <div className="absolute -right-6 bottom-8 h-36 w-36 rounded-full bg-sky-400/20 blur-3xl" />
+                <div className="relative w-full rounded-[28px] border border-white/10 bg-slate-950/75 p-6 shadow-[0_24px_80px_rgba(8,47,73,0.45)] backdrop-blur-sm">
+                  <div className="mb-5 flex items-center justify-between">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">Workspace</p>
+                      <p className="mt-2 text-lg font-semibold text-slate-100">Operator Console</p>
+                    </div>
+                    <Image src="/globe.svg" alt="Decorative login illustration" width={46} height={46} className="opacity-90" />
+                  </div>
+                  <div className="space-y-3">
+                    <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3">
+                      <div className="h-2.5 w-20 rounded-full bg-cyan-300/75" />
+                      <div className="mt-3 h-2 w-full rounded-full bg-slate-800" />
+                      <div className="mt-2 h-2 w-4/5 rounded-full bg-slate-800" />
+                    </div>
+                    <div className="grid grid-cols-[0.9fr_1.1fr] gap-3">
+                      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3">
+                        <div className="h-16 rounded-xl bg-gradient-to-br from-cyan-400/20 to-transparent" />
+                      </div>
+                      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3">
+                        <div className="h-2.5 w-16 rounded-full bg-slate-700" />
+                        <div className="mt-3 space-y-2">
+                          <div className="h-2 rounded-full bg-slate-800" />
+                          <div className="h-2 rounded-full bg-slate-800" />
+                          <div className="h-2 w-2/3 rounded-full bg-slate-800" />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </section>
 
-        <section className="rounded-[32px] border border-slate-800 bg-slate-950/85 p-8 shadow-[0_28px_90px_rgba(2,6,23,0.4)]">
+        <section className="rounded-[32px] border border-slate-800 bg-slate-950/88 p-8 shadow-[0_28px_90px_rgba(2,6,23,0.4)]">
           <h2 className="text-xl font-semibold text-slate-100">Sign in</h2>
-          <p className="mt-2 text-sm text-slate-500">Wybierz dostępny tryb logowania dla aktualnego stanu serwera.</p>
+          <p className="mt-2 text-sm text-slate-500">Use an available account method to continue.</p>
 
           {backendAvailability === "offline" && (
             <div className="mt-5 rounded-2xl border border-rose-500/25 bg-rose-500/10 p-4 text-sm text-rose-100">
               <p className="font-semibold">Control server unavailable</p>
-              <p className="mt-2 text-rose-100/80">
-                The dashboard lost the backend connection. User sessions on this server live only in memory, so after restart you must sign in again.
-              </p>
+              <p className="mt-2 text-rose-100/80">Reconnect to the backend and try again.</p>
               <button
                 onClick={async () => {
                   setError(null);
@@ -99,25 +142,26 @@ function AuthScreen({
             </div>
           )}
 
-          <div className="mt-6 space-y-6">
-            <div className={`rounded-2xl border p-5 ${localLoginEnabled ? "border-cyan-500/25 bg-cyan-500/10" : "border-slate-800 bg-slate-900/50 opacity-60"}`}>
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-slate-100">Local bootstrap admin</p>
-                  <p className="mt-1 text-xs text-slate-500">Dostępne tylko zanim aktywujesz Microsoft Entra.</p>
-                </div>
-                <span className="rounded-full border border-slate-700 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">
-                  {localLoginEnabled ? "enabled" : "disabled"}
-                </span>
+          <div className="mt-6 rounded-[28px] border border-slate-800 bg-slate-900/55 p-5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-100">Account access</p>
+                <p className="mt-1 text-xs text-slate-500">Choose a sign-in method that is currently enabled on the server.</p>
               </div>
+              <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-slate-400">
+                <span className={`rounded-full border px-2 py-1 ${localLoginEnabled ? "border-cyan-400/30 text-cyan-200" : "border-slate-700 text-slate-500"}`}>Local</span>
+                <span className={`rounded-full border px-2 py-1 ${microsoftLoginEnabled ? "border-emerald-400/30 text-emerald-200" : "border-slate-700 text-slate-500"}`}>Microsoft</span>
+              </div>
+            </div>
 
-              <div className="mt-4 space-y-3">
+            {localLoginEnabled && (
+              <div className="mt-5 space-y-3">
                 <input
                   value={username}
                   onChange={(event) => setUsername(event.target.value)}
                   placeholder="Username"
                   className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
-                  disabled={!localLoginEnabled || busy !== "idle" || backendAvailability === "offline"}
+                  disabled={busy !== "idle" || backendAvailability === "offline"}
                 />
                 <input
                   value={password}
@@ -125,7 +169,7 @@ function AuthScreen({
                   placeholder="Password"
                   type="password"
                   className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
-                  disabled={!localLoginEnabled || busy !== "idle" || backendAvailability === "offline"}
+                  disabled={busy !== "idle" || backendAvailability === "offline"}
                 />
                 <button
                   onClick={async () => {
@@ -139,41 +183,38 @@ function AuthScreen({
                       setBusy("idle");
                     }
                   }}
-                  disabled={!localLoginEnabled || busy !== "idle" || !username || !password || backendAvailability === "offline"}
+                  disabled={busy !== "idle" || !username || !password || backendAvailability === "offline"}
                   className="w-full rounded-xl bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition-colors hover:bg-cyan-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
                 >
-                  {busy === "local" ? "Signing in..." : "Sign in with local admin"}
+                  {busy === "local" ? "Signing in..." : "Sign in"}
                 </button>
               </div>
-            </div>
+            )}
 
-            <div className={`rounded-2xl border p-5 ${microsoftLoginEnabled ? "border-emerald-500/20 bg-emerald-500/10" : "border-slate-800 bg-slate-900/50 opacity-60"}`}>
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-slate-100">Microsoft Entra SSO</p>
-                  <p className="mt-1 text-xs text-slate-500">Aktywowany po skonfigurowaniu tenant/client i włączeniu providera w Settings.</p>
-                </div>
-                <span className="rounded-full border border-slate-700 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">
-                  {microsoftLoginEnabled ? "active" : "not ready"}
-                </span>
+            {localLoginEnabled && microsoftLoginEnabled && (
+              <div className="my-5 flex items-center gap-3 text-xs uppercase tracking-[0.2em] text-slate-600">
+                <div className="h-px flex-1 bg-slate-800" />
+                <span>or</span>
+                <div className="h-px flex-1 bg-slate-800" />
               </div>
-              <button
-                onClick={async () => {
-                  setBusy("microsoft");
-                  setError(null);
-                  try {
-                    await onMicrosoftLogin();
-                  } catch (loginError) {
-                    setError(loginError instanceof Error ? loginError.message : "Microsoft login failed");
-                    setBusy("idle");
-                  }
-                }}
-                disabled={!microsoftLoginEnabled || busy !== "idle" || backendAvailability === "offline"}
-                className="mt-4 w-full rounded-xl border border-emerald-400/40 bg-emerald-400/15 px-4 py-2.5 text-sm font-semibold text-emerald-100 transition-colors hover:bg-emerald-400/25 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-800 disabled:text-slate-500"
-              >
-                {busy === "microsoft" ? "Redirecting..." : "Continue with Microsoft"}
-              </button>
-            </div>
+            )}
+
+            <button
+              onClick={async () => {
+                setBusy("microsoft");
+                setError(null);
+                try {
+                  await onMicrosoftLogin();
+                } catch (loginError) {
+                  setError(loginError instanceof Error ? loginError.message : "Microsoft login failed");
+                  setBusy("idle");
+                }
+              }}
+              disabled={!microsoftLoginEnabled || busy !== "idle" || backendAvailability === "offline"}
+              className="w-full rounded-xl border border-emerald-400/40 bg-emerald-400/15 px-4 py-2.5 text-sm font-semibold text-emerald-100 transition-colors hover:bg-emerald-400/25 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-800 disabled:text-slate-500"
+            >
+              {busy === "microsoft" ? "Redirecting..." : "Continue with Microsoft"}
+            </button>
           </div>
 
           {error && <p className="mt-4 text-sm text-rose-300">{error}</p>}

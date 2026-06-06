@@ -30,7 +30,6 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
   const [agentId, setAgentId] = useState(initialAgentId || "");
   const [hostname, setHostname] = useState(initialHostname || "");
   const [displayName, setDisplayName] = useState(initialDisplayName || "");
-  const [guacamoleTargetHost, setGuacamoleTargetHost] = useState("");
   const [guacamoleUsername, setGuacamoleUsername] = useState("");
   const [guacamoleDomain, setGuacamoleDomain] = useState("");
   const [guacamolePassword, setGuacamolePassword] = useState("");
@@ -56,7 +55,6 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
     setAgentId(initialAgentId || initialHostname || "");
     setHostname(initialHostname || "");
     setDisplayName(initialDisplayName || initialHostname || "");
-    setGuacamoleTargetHost(initialHostname || "");
     setGuacamoleUsername("");
     setGuacamoleDomain("");
     setGuacamolePassword("");
@@ -106,13 +104,16 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
             </label>
 
             <label className="block text-sm">
-              <span className="mb-1 block text-slate-300">Hostname</span>
+              <span className="mb-1 block text-slate-300">Host FQDN</span>
               <input
                 value={hostname}
                 onChange={(event) => setHostname(event.target.value)}
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
-                placeholder="DESKTOP-ABC123"
+                placeholder="vm01.tenant.example.local"
               />
+              <span className="mt-1 block text-xs text-slate-500">
+                Primary host identifier for this deployment. It is written into the bootstrap package and also reused as the default Guacamole/RDP target.
+              </span>
             </label>
 
             <label className="block text-sm">
@@ -123,73 +124,6 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
                 placeholder="Operator desktop"
               />
-            </label>
-
-            <label className="block text-sm">
-              <span className="mb-1 block text-slate-300">Guacamole / RDP Target Host</span>
-              <input
-                value={guacamoleTargetHost}
-                onChange={(event) => setGuacamoleTargetHost(event.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
-                placeholder="192.168.1.50 or vm01.lab.local"
-              />
-              <span className="mt-1 block text-xs text-slate-500">
-                This is the real RDP endpoint used by Guacamole. It can be an IP or DNS name and does not need to match the agent hostname.
-              </span>
-            </label>
-
-            <label className="block text-sm">
-              <span className="mb-1 block text-slate-300">Guacamole Username</span>
-              <input
-                value={guacamoleUsername}
-                onChange={(event) => setGuacamoleUsername(event.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
-                placeholder="Optional VM username"
-              />
-              <span className="mt-1 block text-xs text-slate-500">
-                Enter only the account name here. If you need `DOMAIN\\user`, put `user` here and fill the domain field below.
-              </span>
-            </label>
-
-            <label className="block text-sm">
-              <span className="mb-1 block text-slate-300">Guacamole Domain</span>
-              <input
-                value={guacamoleDomain}
-                onChange={(event) => setGuacamoleDomain(event.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
-                placeholder="Optional domain, for example DESKTOP-JJULF7D"
-              />
-              <span className="mt-1 block text-xs text-slate-500">
-                This is sent to Guacamole as the RDP `domain` parameter. If left empty, the backend will still split `DOMAIN\\user` automatically when it sees that legacy format.
-              </span>
-            </label>
-
-            <label className="block text-sm">
-              <span className="mb-1 block text-slate-300">Guacamole Password</span>
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={guacamolePassword}
-                onChange={(event) => setGuacamolePassword(event.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
-                placeholder="Optional RDP password"
-              />
-              <span className="mt-1 block text-xs text-slate-500">
-                Used only to render Guacamole connection parameters during provisioning. It is not persisted into agent metadata or deployment files.
-              </span>
-            </label>
-
-            <label className="block text-sm">
-              <span className="mb-1 block text-slate-300">Secret Reference</span>
-              <input
-                value={guacamoleSecret}
-                onChange={(event) => setGuacamoleSecret(event.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
-                placeholder="Optional secret ID or Vaultwarden reference"
-              />
-              <span className="mt-1 block text-xs text-slate-500">
-                This is passed through as a template value for Guacamole parameters. It does not integrate Vaultwarden automatically yet, but it gives you a stable reference to wire later.
-              </span>
             </label>
 
             <label className="block text-sm">
@@ -222,6 +156,65 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
               </div>
             )}
 
+            <details className="rounded-lg border border-slate-700 bg-slate-950/40 p-3">
+              <summary className="cursor-pointer text-sm font-medium text-slate-200">Advanced Guacamole options</summary>
+              <div className="mt-4 space-y-4">
+                <label className="block text-sm">
+                  <span className="mb-1 block text-slate-300">Guacamole Username</span>
+                  <input
+                    value={guacamoleUsername}
+                    onChange={(event) => setGuacamoleUsername(event.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                    placeholder="Optional VM username"
+                  />
+                  <span className="mt-1 block text-xs text-slate-500">
+                    Enter only the account name here. If you need `DOMAIN\\user`, put `user` here and fill the domain field below.
+                  </span>
+                </label>
+
+                <label className="block text-sm">
+                  <span className="mb-1 block text-slate-300">Guacamole Domain</span>
+                  <input
+                    value={guacamoleDomain}
+                    onChange={(event) => setGuacamoleDomain(event.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                    placeholder="Optional domain, for example DESKTOP-JJULF7D"
+                  />
+                  <span className="mt-1 block text-xs text-slate-500">
+                    This is sent to Guacamole as the RDP `domain` parameter. If left empty, the backend will still split `DOMAIN\\user` automatically when it sees that legacy format.
+                  </span>
+                </label>
+
+                <label className="block text-sm">
+                  <span className="mb-1 block text-slate-300">Guacamole Password</span>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={guacamolePassword}
+                    onChange={(event) => setGuacamolePassword(event.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                    placeholder="Optional RDP password"
+                  />
+                  <span className="mt-1 block text-xs text-slate-500">
+                    Used only to render Guacamole connection parameters during provisioning. It is not persisted into agent metadata or deployment files.
+                  </span>
+                </label>
+
+                <label className="block text-sm">
+                  <span className="mb-1 block text-slate-300">Secret Reference</span>
+                  <input
+                    value={guacamoleSecret}
+                    onChange={(event) => setGuacamoleSecret(event.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                    placeholder="Optional secret ID or Vaultwarden reference"
+                  />
+                  <span className="mt-1 block text-xs text-slate-500">
+                    This is passed through as a template value for Guacamole parameters. It does not integrate Vaultwarden automatically yet, but it gives you a stable reference to wire later.
+                  </span>
+                </label>
+              </div>
+            </details>
+
             {config?.active_deployment && (!deploymentId || deploymentId !== config.active_deployment.id) && (
               <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
                 Another prepare deployment is already running for {config.active_deployment.hostname}. Wait until it finishes before starting a new one.
@@ -239,7 +232,7 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
                     agent_id: agentId || hostname,
                     hostname,
                     display_name: displayName,
-                    guacamole_target_host: guacamoleTargetHost || hostname,
+                    guacamole_target_host: hostname,
                     guacamole_username: guacamoleUsername,
                     guacamole_domain: guacamoleDomain,
                     guacamole_password: guacamolePassword,
