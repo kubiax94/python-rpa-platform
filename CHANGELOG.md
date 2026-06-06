@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/kubiax94/python-rpa-platform/compare/v0.4.0...v0.4.1) (2026-06-06)
+
+
+### Bug Fixes
+
+* **agent:** service installation fix ([f841326](https://github.com/kubiax94/python-rpa-platform/commit/f84132633ab94dce4afed5d2fb8d4dc9a029f397))
+
 ## [0.4.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.3.0...v0.4.0) (2026-06-06)
 
 
