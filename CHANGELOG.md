@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/kubiax94/python-rpa-platform/compare/v0.1.2...v0.1.3) (2026-06-06)
+
+
+### Bug Fixes
+
+* frontend layout, login, deploy ([f19037d](https://github.com/kubiax94/python-rpa-platform/commit/f19037d65d987b4eb4b499e774642a258df975ca))
+
 ## [0.1.2](https://github.com/kubiax94/python-rpa-platform/compare/v0.1.1...v0.1.2) (2026-06-06)
 
 
