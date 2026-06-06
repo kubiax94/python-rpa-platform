@@ -11,8 +11,8 @@ class DeploymentResponse(ApiResponseModel):
     id: str
     agent_id: str = ""
     hostname: str = ""
-    repo_url: str = ""
-    source_ref: str = "main"
+    release_id: str | None = None
+    tag_name: str = ""
     requested_by: str = "user"
     status: str = "queued"
     task_id: str | None = None
@@ -30,12 +30,33 @@ class DeploymentResponse(ApiResponseModel):
     completed_at: int | None = None
 
 
+class AgentReleaseResponse(ApiResponseModel):
+    id: str
+    version: str = ""
+    tag_name: str = ""
+    commit_sha: str = ""
+    artifact_url: str = ""
+    artifact_sha256: str = ""
+    workflow_run_id: str | None = None
+    created_at: int | None = None
+    published_at: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class DeploymentConfigResponse(ApiResponseModel):
     default_repo_url: str = ""
-    default_source_ref: str = "main"
     artifact_share_root: str = ""
     latest_installer_share_template: str = ""
     active_deployment: DeploymentResponse | None = None
+    latest_release: AgentReleaseResponse | None = None
+    releases: list[AgentReleaseResponse] = Field(default_factory=list)
+
+
+class DeploymentReleasesResponse(ApiResponseModel):
+    repo_slug: str = ""
+    repo_url: str = ""
+    latest_release: AgentReleaseResponse | None = None
+    releases: list[AgentReleaseResponse] = Field(default_factory=list)
 
 
 class GuacamoleProvisioningDiagnosticsResponse(ApiResponseModel):

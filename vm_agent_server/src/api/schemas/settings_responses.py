@@ -5,7 +5,6 @@ from vm_agent_server.src.api.schemas.task_responses import ApiResponseModel
 
 class DeploymentDefaultsResponse(ApiResponseModel):
     default_repo_url: str = ""
-    default_source_ref: str = "main"
     artifact_share_root: str = ""
     latest_installer_share_template: str = ""
 

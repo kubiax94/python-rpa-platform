@@ -16,6 +16,5 @@ class PrepareDeploymentRequest(ApiRequestModel):
     guacamole_secret: str | None = None
     guacamole_group_name: str | None = None
     guacamole_connection_name: str | None = None
-    repo_url: str | None = None
-    source_ref: str = "main"
+    release_id: str | None = None
     requested_by: str = "user"

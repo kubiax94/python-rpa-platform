@@ -53,8 +53,6 @@ CREATE TABLE IF NOT EXISTS agent_deployments (
     agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     release_id          TEXT REFERENCES agent_releases(id),
     hostname            TEXT NOT NULL,
-    repo_url            TEXT NOT NULL DEFAULT '',
-    source_ref          TEXT NOT NULL DEFAULT 'main',
     requested_by        TEXT NOT NULL DEFAULT 'user',
     status              TEXT NOT NULL DEFAULT 'queued',
     task_id             TEXT,
@@ -154,8 +152,8 @@ class AgentRegistryDB:
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(SCHEMA)
+        await self._migrate_agent_deployments_schema()
         await self._ensure_column("agents", "last_deployment_id", "TEXT")
-        await self._ensure_column("agent_deployments", "repo_url", "TEXT NOT NULL DEFAULT ''")
         await self._ensure_column("agent_deployments", "release_id", "TEXT")
         await self._ensure_column("agent_deployments", "task_id", "TEXT")
         await self._ensure_column("agent_deployments", "tag_name", "TEXT NOT NULL DEFAULT ''")
@@ -178,6 +176,103 @@ class AgentRegistryDB:
             existing = {row[1] async for row in cursor}
         if column not in existing:
             await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+    async def _get_table_columns(self, table: str) -> set[str]:
+        if not self._db:
+            return set()
+
+        async with self._db.execute(f"PRAGMA table_info({table})") as cursor:
+            return {row[1] async for row in cursor}
+
+    async def _migrate_agent_deployments_schema(self) -> None:
+        if not self._db:
+            return
+
+        existing = await self._get_table_columns("agent_deployments")
+        if not existing or ("repo_url" not in existing and "source_ref" not in existing):
+            return
+
+        desired_columns: tuple[tuple[str, str], ...] = (
+            ("id", "id"),
+            ("agent_id", "agent_id"),
+            ("release_id", "release_id"),
+            ("hostname", "hostname"),
+            ("requested_by", "requested_by"),
+            ("status", "status"),
+            ("task_id", "task_id"),
+            ("commit_sha", "commit_sha"),
+            ("tag_name", "tag_name"),
+            ("artifact_dir", "artifact_dir"),
+            ("artifact_exe_path", "artifact_exe_path"),
+            ("package_zip_path", "package_zip_path"),
+            ("bootstrap_path", "bootstrap_path"),
+            ("install_script_path", "install_script_path"),
+            ("installer_copy_path", "installer_copy_path"),
+            ("metadata_json", "metadata_json"),
+            ("error", "error"),
+            ("build_log", "build_log"),
+            ("created_at", "created_at"),
+            ("started_at", "started_at"),
+            ("completed_at", "completed_at"),
+        )
+        defaults = {
+            "release_id": "NULL",
+            "task_id": "NULL",
+            "commit_sha": "''",
+            "tag_name": "''",
+            "artifact_dir": "''",
+            "artifact_exe_path": "''",
+            "package_zip_path": "''",
+            "bootstrap_path": "''",
+            "install_script_path": "''",
+            "installer_copy_path": "''",
+            "metadata_json": "'{}'",
+            "error": "NULL",
+            "build_log": "''",
+            "started_at": "NULL",
+            "completed_at": "NULL",
+        }
+        select_parts = [column if column in existing else defaults.get(column, "NULL") for column, _ in desired_columns]
+        insert_columns = ", ".join(column for column, _ in desired_columns)
+        select_clause = ", ".join(select_parts)
+
+        await self._db.execute("PRAGMA foreign_keys=OFF")
+        await self._db.execute(
+            """
+            CREATE TABLE agent_deployments_new (
+                id                  TEXT PRIMARY KEY,
+                agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                release_id          TEXT REFERENCES agent_releases(id),
+                hostname            TEXT NOT NULL,
+                requested_by        TEXT NOT NULL DEFAULT 'user',
+                status              TEXT NOT NULL DEFAULT 'queued',
+                task_id             TEXT,
+                commit_sha          TEXT NOT NULL DEFAULT '',
+                tag_name            TEXT NOT NULL DEFAULT '',
+                artifact_dir        TEXT NOT NULL DEFAULT '',
+                artifact_exe_path   TEXT NOT NULL DEFAULT '',
+                package_zip_path    TEXT NOT NULL DEFAULT '',
+                bootstrap_path      TEXT NOT NULL DEFAULT '',
+                install_script_path TEXT NOT NULL DEFAULT '',
+                installer_copy_path TEXT NOT NULL DEFAULT '',
+                metadata_json       TEXT NOT NULL DEFAULT '{}',
+                error               TEXT,
+                build_log           TEXT NOT NULL DEFAULT '',
+                created_at          INTEGER NOT NULL,
+                started_at          INTEGER,
+                completed_at        INTEGER
+            )
+            """
+        )
+        await self._db.execute(
+            f"INSERT INTO agent_deployments_new ({insert_columns}) SELECT {select_clause} FROM agent_deployments"
+        )
+        await self._db.execute("DROP TABLE agent_deployments")
+        await self._db.execute("ALTER TABLE agent_deployments_new RENAME TO agent_deployments")
+        await self._db.execute("CREATE INDEX IF NOT EXISTS idx_deployments_agent ON agent_deployments(agent_id, created_at DESC)")
+        await self._db.execute("CREATE INDEX IF NOT EXISTS idx_deployments_status ON agent_deployments(status, created_at DESC)")
+        await self._db.execute("PRAGMA foreign_keys=ON")
+        await self._db.commit()
 
     async def stop(self):
         if self._db:
@@ -420,8 +515,6 @@ class AgentRegistryDB:
         deployment_id: str,
         agent_id: str,
         hostname: str,
-        repo_url: str,
-        source_ref: str,
         requested_by: str,
         task_id: str,
         *,
@@ -434,10 +527,10 @@ class AgentRegistryDB:
         now = int(time.time())
         await self._db.execute(
             """
-            INSERT INTO agent_deployments (id, release_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, status, metadata_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+            INSERT INTO agent_deployments (id, release_id, agent_id, hostname, requested_by, task_id, status, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
             """,
-            (deployment_id, release_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, _serialize_metadata(metadata), now),
+            (deployment_id, release_id, agent_id, hostname, requested_by, task_id, _serialize_metadata(metadata), now),
         )
         await self._db.commit()
         await self.upsert_agent(agent_id, hostname=hostname, last_deployment_id=deployment_id)
@@ -826,7 +919,7 @@ class AgentRegistryDB:
         if not self._db:
             return None
         async with self._db.execute(
-            "SELECT * FROM agent_deployments WHERE status IN ('queued', 'building') ORDER BY created_at ASC LIMIT 1"
+            "SELECT * FROM agent_deployments WHERE status IN ('queued', 'building', 'preparing') ORDER BY created_at ASC LIMIT 1"
         ) as cursor:
             row = await cursor.fetchone()
             if not row:
@@ -842,7 +935,7 @@ class AgentRegistryDB:
 
         rows: list[dict[str, Any]] = []
         async with self._db.execute(
-            "SELECT * FROM agent_deployments WHERE status IN ('queued', 'building') ORDER BY created_at ASC"
+            "SELECT * FROM agent_deployments WHERE status IN ('queued', 'building', 'preparing') ORDER BY created_at ASC"
         ) as cursor:
             columns = [d[0] for d in cursor.description]
             async for row in cursor:

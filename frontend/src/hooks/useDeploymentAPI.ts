@@ -8,8 +8,8 @@ export interface AgentDeployment {
   id: string;
   agent_id: string;
   hostname: string;
-  repo_url: string;
-  source_ref: string;
+  release_id: string | null;
+  tag_name: string;
   requested_by: string;
   status: string;
   task_id: string | null;
@@ -25,6 +25,19 @@ export interface AgentDeployment {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+}
+
+export interface AgentRelease {
+  id: string;
+  version: string;
+  tag_name: string;
+  commit_sha: string;
+  artifact_url: string;
+  artifact_sha256: string;
+  workflow_run_id: string | null;
+  created_at: number | null;
+  published_at: number | null;
+  metadata: Record<string, unknown>;
 }
 
 export interface DeploymentProvisioningEntity {
@@ -46,15 +59,15 @@ export interface DeploymentProvisioningDiagnostics {
 
 export interface DeploymentConfig {
   default_repo_url: string;
-  default_source_ref: string;
   artifact_share_root: string;
   latest_installer_share_template: string;
   active_deployment: AgentDeployment | null;
+  latest_release: AgentRelease | null;
+  releases: AgentRelease[];
 }
 
 export interface DeploymentDefaultsSettings {
   default_repo_url: string;
-  default_source_ref: string;
   artifact_share_root: string;
   latest_installer_share_template: string;
 }
@@ -163,8 +176,7 @@ export async function prepareDeployment(body: {
   guacamole_secret?: string;
   guacamole_group_name?: string;
   guacamole_connection_name?: string;
-  repo_url?: string;
-  source_ref?: string;
+  release_id?: string;
   requested_by?: string;
 }): Promise<AgentDeployment> {
   return postJSON<AgentDeployment>(`${API_BASE}/api/deployments/prepare`, body);
@@ -184,6 +196,10 @@ export function getDeploymentInstallerUrl(deploymentId: string): string {
 
 export function getDeploymentPackageUrl(deploymentId: string): string {
   return withAccessToken(`${API_BASE}/api/deployments/${encodeURIComponent(deploymentId)}/package`);
+}
+
+export function getReleaseArtifactUrl(releaseId: string): string {
+  return withAccessToken(`${API_BASE}/api/deployments/releases/${encodeURIComponent(releaseId)}/artifact`);
 }
 
 export function buildLocalInstallCommand(deployment: AgentDeployment): string {

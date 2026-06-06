@@ -12,7 +12,6 @@ class DeploymentDefaultsSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     default_repo_url: str = ""
-    default_source_ref: str = "main"
     artifact_share_root: str = ""
     latest_installer_share_template: str = ""
 
@@ -89,7 +88,6 @@ class DeploymentDefaultsPatch(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     default_repo_url: str | None = None
-    default_source_ref: str | None = None
     artifact_share_root: str | None = None
     latest_installer_share_template: str | None = None
 

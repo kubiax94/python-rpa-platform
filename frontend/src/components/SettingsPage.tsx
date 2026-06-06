@@ -194,7 +194,6 @@ export function SettingsPage() {
   const { data: serverSettings, loading: settingsLoading, refresh: refreshServerSettings } = useServerSettings();
   const [draftDeployment, setDraftDeployment] = useState<null | {
     default_repo_url: string;
-    default_source_ref: string;
     artifact_share_root: string;
     latest_installer_share_template: string;
   }>(null);
@@ -251,7 +250,6 @@ export function SettingsPage() {
 
   const deploymentSettings = draftDeployment ?? serverSettings?.deployment ?? {
     default_repo_url: "",
-    default_source_ref: "main",
     artifact_share_root: "",
     latest_installer_share_template: "",
   };
@@ -363,17 +361,12 @@ export function SettingsPage() {
         <div className="space-y-6">
           {activeSection === "general" && (
             <>
-              <div className="grid gap-4 lg:grid-cols-3">
+              <div className="grid gap-4 lg:grid-cols-2">
                 <MetricCard
                   label="Settings Mode"
                   value={settingsLoading ? "Loading" : "Editable"}
                   accent="cyan"
                   detail="Current server defaults are writable through the backend settings API."
-                />
-                <MetricCard
-                  label="Default Ref"
-                  value={deploymentSettings.default_source_ref || "main"}
-                  detail="Used by the prepare deployment flow unless overridden manually."
                 />
                 <MetricCard
                   label="Artifact Share"
@@ -399,19 +392,6 @@ export function SettingsPage() {
                       }))}
                       className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
                       placeholder="https://github.com/example/repo.git"
-                    />
-                  </label>
-
-                  <label className="block text-sm">
-                    <span className="mb-1 block text-slate-300">Default Source Ref</span>
-                    <input
-                      value={deploymentSettings.default_source_ref}
-                      onChange={(event) => setDraftDeployment((current) => ({
-                        ...(current ?? deploymentSettings),
-                        default_source_ref: event.target.value,
-                      }))}
-                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
-                      placeholder="main"
                     />
                   </label>
 
@@ -451,7 +431,6 @@ export function SettingsPage() {
                         await updateServerSettings({
                           deployment: {
                             default_repo_url: deploymentSettings.default_repo_url,
-                            default_source_ref: deploymentSettings.default_source_ref,
                             artifact_share_root: deploymentSettings.artifact_share_root,
                             latest_installer_share_template: deploymentSettings.latest_installer_share_template,
                           },

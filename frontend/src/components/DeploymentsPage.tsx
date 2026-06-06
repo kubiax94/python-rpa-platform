@@ -13,7 +13,7 @@ function statusClasses(status: string): string {
   if (status === "ready") return "bg-emerald-500/15 text-emerald-300";
   if (status === "failed") return "bg-red-500/15 text-red-300";
   if (status === "expired_bootstrap") return "bg-orange-500/15 text-orange-300";
-  if (status === "building") return "bg-amber-500/15 text-amber-300";
+  if (status === "building" || status === "preparing") return "bg-amber-500/15 text-amber-300";
   return "bg-slate-700 text-slate-300";
 }
 
@@ -66,7 +66,7 @@ export function DeploymentsPage({ canOperate }: { canOperate: boolean }) {
                   </span>
                 </div>
                 <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
-                  <span>{item.source_ref || "main"}</span>
+                  <span>{item.tag_name || item.release_id || "release"}</span>
                   <span>{formatDateTime(item.created_at)}</span>
                 </div>
               </button>
@@ -132,8 +132,8 @@ export function DeploymentsPage({ canOperate }: { canOperate: boolean }) {
                   <div className="mt-1 font-mono text-slate-200">{formatDateTime(deployment.completed_at)}</div>
                 </div>
                 <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-sm md:col-span-2">
-                  <div className="text-slate-400">Repo</div>
-                  <div className="mt-1 break-all font-mono text-slate-200">{deployment.repo_url || "-"}</div>
+                  <div className="text-slate-400">Release</div>
+                  <div className="mt-1 break-all font-mono text-slate-200">{deployment.tag_name || deployment.release_id || "-"}</div>
                 </div>
                 <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-sm md:col-span-2">
                   <div className="text-slate-400">Commit</div>
@@ -161,8 +161,8 @@ export function DeploymentsPage({ canOperate }: { canOperate: boolean }) {
               </div>
 
               <div className="rounded-xl border border-slate-700 bg-slate-950/70 p-4">
-                <div className="mb-2 text-sm font-medium text-slate-200">Build log</div>
-                <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs text-slate-400">{deployment.build_log || "No build log saved."}</pre>
+                <div className="mb-2 text-sm font-medium text-slate-200">Prepare log</div>
+                <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs text-slate-400">{deployment.build_log || "No prepare log saved."}</pre>
               </div>
 
               {deployment.error && (

@@ -35,8 +35,7 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
   const [guacamoleDomain, setGuacamoleDomain] = useState("");
   const [guacamolePassword, setGuacamolePassword] = useState("");
   const [guacamoleSecret, setGuacamoleSecret] = useState("");
-  const [repoUrl, setRepoUrl] = useState("");
-  const [sourceRef, setSourceRef] = useState("main");
+  const [selectedReleaseId, setSelectedReleaseId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deploymentId, setDeploymentId] = useState<string | null>(null);
@@ -62,6 +61,7 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
     setGuacamoleDomain("");
     setGuacamolePassword("");
     setGuacamoleSecret("");
+    setSelectedReleaseId("");
     setError(null);
     setDeploymentId(config?.active_deployment?.id ?? null);
   }, [open, initialAgentId, initialDisplayName, initialHostname, config?.active_deployment?.id]);
@@ -70,10 +70,11 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
     if (!open || defaultsApplied || !config) {
       return;
     }
-    setRepoUrl(config.default_repo_url || "");
-    setSourceRef(config.default_source_ref || "main");
+    setSelectedReleaseId(config.latest_release?.id || config.releases[0]?.id || "");
     setDefaultsApplied(true);
   }, [open, defaultsApplied, config]);
+
+  const selectedRelease = config?.releases.find((release) => release.id === selectedReleaseId) ?? config?.latest_release ?? null;
 
   if (!open) {
     return null;
@@ -85,7 +86,7 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
         <div className="flex items-center justify-between border-b border-slate-700 px-5 py-4">
           <div>
             <h2 className="text-lg font-semibold text-slate-100">Prepare Agent Deployment</h2>
-            <p className="text-sm text-slate-500">Server builds the package from the selected ref. Installation stays manual on the target machine.</p>
+            <p className="text-sm text-slate-500">Server prepares the package from a published release. Installation stays manual on the target machine.</p>
           </div>
           <button onClick={onClose} className="rounded-md px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200">
             Close
@@ -192,24 +193,34 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
             </label>
 
             <label className="block text-sm">
-              <span className="mb-1 block text-slate-300">Git Ref</span>
-              <input
-                value={sourceRef}
-                onChange={(event) => setSourceRef(event.target.value)}
+              <span className="mb-1 block text-slate-300">Agent Release</span>
+              <select
+                value={selectedReleaseId}
+                onChange={(event) => setSelectedReleaseId(event.target.value)}
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
-                placeholder="main"
-              />
+              >
+                <option value="">Latest available release</option>
+                {config?.releases.map((release) => (
+                  <option key={release.id} value={release.id}>
+                    {(release.tag_name || release.version || release.id) + (release.commit_sha ? ` (${release.commit_sha.slice(0, 12)})` : "")}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block text-xs text-slate-500">
+                The server downloads the published `agent_service.exe` asset for the chosen release and generates the bootstrap package around it.
+              </span>
             </label>
 
-            <label className="block text-sm">
-              <span className="mb-1 block text-slate-300">Repo URL</span>
-              <input
-                value={repoUrl}
-                onChange={(event) => setRepoUrl(event.target.value)}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
-                placeholder="https://github.com/kubiax94/python-rpa-platform.git"
-              />
-            </label>
+            {selectedRelease && (
+              <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">
+                <div>
+                  Release: <span className="font-mono text-slate-200">{selectedRelease.tag_name || selectedRelease.version || selectedRelease.id}</span>
+                </div>
+                <div>
+                  Commit: <span className="font-mono text-slate-200">{selectedRelease.commit_sha || "-"}</span>
+                </div>
+              </div>
+            )}
 
             {config?.active_deployment && (!deploymentId || deploymentId !== config.active_deployment.id) && (
               <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
@@ -235,8 +246,7 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
                     guacamole_secret: guacamoleSecret,
                     guacamole_group_name: agentId || hostname,
                     guacamole_connection_name: hostname,
-                    repo_url: repoUrl,
-                    source_ref: sourceRef,
+                    release_id: selectedReleaseId || undefined,
                   });
                   setDeploymentId(result.id);
                 } catch (submitError) {
@@ -255,7 +265,7 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
 
           <div className="rounded-xl border border-slate-700 bg-slate-950/60 p-4">
             <h3 className="text-sm font-semibold text-slate-100">Deployment Status</h3>
-            {!deployment && <p className="mt-3 text-sm text-slate-500">Submit the form to start a background build job.</p>}
+            {!deployment && <p className="mt-3 text-sm text-slate-500">Submit the form to start a background release packaging job.</p>}
 
             {deployment && (
               <div className="mt-4 space-y-3 text-sm">
@@ -270,8 +280,8 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
                   <span className="font-mono text-slate-200">{formatDateTime(deployment.created_at)}</span>
                 </div>
                 <div className="flex items-start justify-between gap-3">
-                  <span className="text-slate-400">Repo</span>
-                  <span className="font-mono text-slate-200 break-all text-right">{deployment.repo_url || "-"}</span>
+                  <span className="text-slate-400">Release</span>
+                  <span className="font-mono text-slate-200 break-all text-right">{deployment.tag_name || deployment.release_id || "-"}</span>
                 </div>
                 <div className="flex items-start justify-between gap-3">
                   <span className="text-slate-400">Commit</span>

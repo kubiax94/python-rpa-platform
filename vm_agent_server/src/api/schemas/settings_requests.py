@@ -7,7 +7,6 @@ from vm_agent_server.src.api.schemas.task_requests import ApiRequestModel
 
 class DeploymentDefaultsPatchRequest(ApiRequestModel):
     default_repo_url: str | None = None
-    default_source_ref: str | None = Field(default=None, min_length=1)
     artifact_share_root: str | None = None
     latest_installer_share_template: str | None = None
 

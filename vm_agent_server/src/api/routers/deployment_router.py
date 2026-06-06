@@ -10,6 +10,7 @@ from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB
 from vm_agent_server.src.api.schemas.deployment_requests import PrepareDeploymentRequest
 from vm_agent_server.src.api.schemas.deployment_responses import (
     DeploymentConfigResponse,
+    DeploymentReleasesResponse,
     DeploymentResponse,
     GuacamoleProvisioningDiagnosticsResponse,
 )
@@ -39,8 +40,7 @@ def build_deployment_router(
         guacamole_secret = (body.guacamole_secret or "").strip()
         guacamole_group_name = (body.guacamole_group_name or agent_id).strip()
         guacamole_connection_name = (body.guacamole_connection_name or hostname).strip()
-        repo_url = (body.repo_url or deployment_service.get_default_repo_url()).strip()
-        source_ref = body.source_ref.strip() or deployment_service.get_default_source_ref()
+        release_id = (body.release_id or "").strip() or None
         requested_by = body.requested_by.strip() or "user"
 
         try:
@@ -55,8 +55,7 @@ def build_deployment_router(
                 guacamole_secret=guacamole_secret,
                 guacamole_group_name=guacamole_group_name,
                 guacamole_connection_name=guacamole_connection_name,
-                repo_url=repo_url,
-                source_ref=source_ref,
+                release_id=release_id,
                 requested_by=requested_by,
                 server_ws_url=resolve_agent_ws_url(request),
             )
@@ -70,6 +69,31 @@ def build_deployment_router(
     @router.get("/deployments/config", response_model=DeploymentConfigResponse)
     async def api_get_deployment_config():
         return await deployment_service.get_prepare_config()
+
+    @router.get("/deployments/releases", response_model=DeploymentReleasesResponse)
+    async def api_get_deployment_releases():
+        return await deployment_service.get_releases_config()
+
+    @router.get("/deployments/releases/{release_id}/artifact")
+    async def api_proxy_release_artifact(release_id: str, request: Request):
+        if not request_has_minimum_role(request, "operator"):
+            return role_required_response("operator")
+
+        try:
+            artifact_path, asset_name = await deployment_service.get_release_artifact_proxy(release_id)
+        except RuntimeError as exc:
+            detail = str(exc)
+            status_code = 404 if "Release not found" in detail else 502
+            return JSONResponse({"error": detail}, status_code=status_code)
+
+        if not artifact_path.exists():
+            return JSONResponse({"error": "Release artifact not found on disk"}, status_code=404)
+
+        return FileResponse(
+            artifact_path,
+            media_type="application/octet-stream",
+            filename=asset_name,
+        )
 
     @router.get("/deployments", response_model=list[DeploymentResponse])
     async def api_list_deployments(query: Annotated[DeploymentListQuery, Depends()]):

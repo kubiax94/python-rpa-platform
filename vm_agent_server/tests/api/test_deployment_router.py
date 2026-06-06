@@ -13,9 +13,9 @@ class FakeDeploymentService:
     def __init__(self):
         self.prepare_args = None
         self.prepare_error = None
-
-    def get_default_repo_url(self):
-        return "https://example.test/repo.git"
+        self.proxy_release_args = []
+        self.proxy_release_error = None
+        self.proxy_release_artifact_path = None
 
     async def prepare_deployment(self, **kwargs):
         if self.prepare_error is not None:
@@ -24,7 +24,18 @@ class FakeDeploymentService:
         return {"id": "dep-1", "status": "queued"}
 
     async def get_prepare_config(self):
-        return {"default_repo_url": self.get_default_repo_url()}
+        return {"latest_release": {"id": "release-1"}, "releases": [{"id": "release-1"}]}
+
+    async def get_releases_config(self):
+        return {"repo_slug": "owner/repo", "repo_url": "https://example.test/repo.git", "latest_release": None, "releases": []}
+
+    async def get_release_artifact_proxy(self, release_id: str):
+        self.proxy_release_args.append(release_id)
+        if self.proxy_release_error is not None:
+            raise self.proxy_release_error
+        if self.proxy_release_artifact_path is None:
+            raise RuntimeError("Release artifact not configured")
+        return self.proxy_release_artifact_path, self.proxy_release_artifact_path.name
 
 
 class FakeRegistryDB:
@@ -56,7 +67,7 @@ class DeploymentRouterTests(unittest.TestCase):
         self.client = TestClient(app)
 
     def test_prepare_deployment_uses_pydantic_validation(self):
-        response = self.client.post("/api/deployments/prepare", json={"source_ref": "main"})
+        response = self.client.post("/api/deployments/prepare", json={"release_id": "release-1"})
 
         self.assertEqual(response.status_code, 422)
 
@@ -72,9 +83,17 @@ class DeploymentRouterTests(unittest.TestCase):
         self.assertEqual(self.deployment_service.prepare_args["guacamole_target_host"], "vm-01")
         self.assertEqual(self.deployment_service.prepare_args["guacamole_group_name"], "vm-01")
         self.assertEqual(self.deployment_service.prepare_args["guacamole_connection_name"], "vm-01")
-        self.assertEqual(self.deployment_service.prepare_args["repo_url"], "https://example.test/repo.git")
-        self.assertEqual(self.deployment_service.prepare_args["source_ref"], "main")
+        self.assertIsNone(self.deployment_service.prepare_args["release_id"])
         self.assertEqual(self.deployment_service.prepare_args["server_ws_url"], "ws://localhost:8765/ws")
+
+    def test_prepare_deployment_forwards_release_id(self):
+        response = self.client.post(
+            "/api/deployments/prepare",
+            json={"hostname": "vm-01", "release_id": "release-42"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.deployment_service.prepare_args["release_id"], "release-42")
 
     def test_prepare_deployment_forwards_optional_guacamole_username(self):
         response = self.client.post(
@@ -135,6 +154,26 @@ class DeploymentRouterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["content-type"], "application/zip")
         self.assertIn('attachment; filename="deployment-dep-1.zip"', response.headers.get("content-disposition", ""))
+
+    def test_proxy_release_artifact_returns_file_download(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_path = Path(temp_dir) / "agent_service.exe"
+            artifact_path.write_bytes(b"binary")
+            self.deployment_service.proxy_release_artifact_path = artifact_path
+
+            response = self.client.get("/api/deployments/releases/release-1/artifact")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.deployment_service.proxy_release_args, ["release-1"])
+        self.assertIn('attachment; filename="agent_service.exe"', response.headers.get("content-disposition", ""))
+
+    def test_proxy_release_artifact_returns_404_when_release_missing(self):
+        self.deployment_service.proxy_release_error = RuntimeError("Release not found: missing")
+
+        response = self.client.get("/api/deployments/releases/missing/artifact")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"], "Release not found: missing")
 
     def test_prepare_deployment_returns_502_for_backend_failure_without_active_deployment(self):
         self.deployment_service.prepare_error = RuntimeError("Guacamole provisioning failed")

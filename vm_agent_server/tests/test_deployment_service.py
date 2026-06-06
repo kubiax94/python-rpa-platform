@@ -13,15 +13,25 @@ class FakeRegistryDB:
         self.deployments = {}
         self.agent_updates = []
         self.bootstrap_tokens = []
+        self.releases = {
+            "release-1": {
+                "id": "release-1",
+                "version": "1.2.3",
+                "tag_name": "v1.2.3",
+                "commit_sha": "abcdef1234567890",
+                "artifact_url": "https://example.test/releases/agent_service.exe",
+                "artifact_sha256": "deadbeef",
+            }
+        }
 
     async def get_active_deployment(self):
         for deployment in self.deployments.values():
-            if deployment["status"] in {"queued", "building"}:
+            if deployment["status"] in {"queued", "building", "preparing"}:
                 return deployment
         return None
 
     async def get_active_deployments(self):
-        return [deployment for deployment in self.deployments.values() if deployment["status"] in {"queued", "building"}]
+        return [deployment for deployment in self.deployments.values() if deployment["status"] in {"queued", "building", "preparing"}]
 
     async def upsert_agent(self, agent_id, **kwargs):
         self.agent_updates.append((agent_id, kwargs))
@@ -29,13 +39,12 @@ class FakeRegistryDB:
     async def set_bootstrap_token(self, agent_id, token_hash, expires_at):
         self.bootstrap_tokens.append((agent_id, token_hash, expires_at))
 
-    async def create_deployment(self, deployment_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, metadata=None):
+    async def create_deployment(self, deployment_id, agent_id, hostname, requested_by, task_id, release_id=None, metadata=None):
         self.deployments[deployment_id] = {
             "id": deployment_id,
             "agent_id": agent_id,
             "hostname": hostname,
-            "repo_url": repo_url,
-            "source_ref": source_ref,
+            "release_id": release_id,
             "requested_by": requested_by,
             "task_id": task_id,
             "status": "queued",
@@ -47,6 +56,31 @@ class FakeRegistryDB:
 
     async def get_deployment(self, deployment_id):
         return self.deployments.get(deployment_id)
+
+    async def get_release(self, release_id):
+        return self.releases.get(release_id)
+
+    async def get_latest_release(self):
+        return self.releases["release-1"]
+
+    async def get_releases(self, limit=20):
+        return list(self.releases.values())[:limit]
+
+    async def upsert_release_from_source(self, **kwargs):
+        release_id = kwargs.get("release_id") or "release-1"
+        release = {
+            "id": release_id,
+            "version": kwargs["version"],
+            "tag_name": kwargs.get("tag_name") or "",
+            "commit_sha": kwargs["commit_sha"],
+            "artifact_url": kwargs["artifact_url"],
+            "artifact_sha256": kwargs["artifact_sha256"],
+            "workflow_run_id": kwargs.get("workflow_run_id"),
+            "published_at": kwargs.get("published_at"),
+            "metadata": kwargs.get("metadata") or {},
+        }
+        self.releases[release_id] = release
+        return release
 
 
 class FakeTaskDB:
@@ -112,8 +146,7 @@ class DeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
                 guacamole_secret="vault-ref",
                 guacamole_group_name="agent-1",
                 guacamole_connection_name="vm-01",
-                repo_url="https://example.test/repo.git",
-                source_ref="main",
+                release_id="release-1",
                 requested_by="operator",
                 server_ws_url="ws://localhost:8765/ws",
             )
@@ -130,6 +163,36 @@ class DeploymentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_update["metadata"]["guacamole"]["username"], "operator")
         self.assertEqual(first_update["metadata"]["guacamole"]["domain"], "DESKTOP-JJULF7D")
         self.assertEqual(self.registry_db.deployments[deployment["id"]]["metadata"]["guacamole_provisioning"]["connection"]["action"], "created")
+        self.assertEqual(self.registry_db.deployments[deployment["id"]]["release_id"], "release-1")
+
+    async def test_get_release_artifact_proxy_downloads_and_reuses_cached_file(self):
+        artifact_bytes = b"release-binary"
+        checksum = "7596d7bc3afde5a1a0ddf7406af03bd0e60344f9728f8f3924d5785cc7e949a9"
+        self.registry_db.releases["release-1"]["artifact_sha256"] = checksum
+        self.registry_db.releases["release-1"]["metadata"] = {"asset_name": "agent_service.exe"}
+
+        with patch.object(self.service, "_download_release_artifact", return_value=checksum) as download_mock, patch.object(
+            self.service,
+            "_hash_file_sha256",
+            return_value=checksum,
+        ):
+            cache_dir = Path(self.temp_dir.name) / "artifacts" / "release-proxy" / "release-1"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cached_path = cache_dir / "agent_service.exe"
+
+            def fake_download(url, destination, task_id=None):
+                destination.write_bytes(artifact_bytes)
+                return checksum
+
+            download_mock.side_effect = fake_download
+            first_path, first_name = await self.service.get_release_artifact_proxy("release-1")
+            second_path, second_name = await self.service.get_release_artifact_proxy("release-1")
+
+        self.assertEqual(first_name, "agent_service.exe")
+        self.assertEqual(second_name, "agent_service.exe")
+        self.assertEqual(first_path, second_path)
+        self.assertEqual(first_path.read_bytes(), artifact_bytes)
+        self.assertEqual(download_mock.call_count, 1)
 
     async def test_recover_interrupted_deployments_marks_active_rows_failed(self):
         self.registry_db.deployments = {
