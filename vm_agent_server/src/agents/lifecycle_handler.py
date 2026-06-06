@@ -13,6 +13,26 @@ from vm_agent_server.src.network.context import AgentConnectionState, AgentLifec
 logger = logging.getLogger(__name__)
 
 
+def _normalize_hostname(value: str) -> tuple[str, str]:
+    cleaned = value.strip().rstrip(".").lower()
+    short_name = cleaned.split(".", 1)[0] if cleaned else ""
+    return cleaned, short_name
+
+
+def _host_matches(expected_value: str, *candidate_values: str) -> bool:
+    expected_full, expected_short = _normalize_hostname(expected_value)
+    if not expected_full and not expected_short:
+        return True
+
+    for candidate in candidate_values:
+        candidate_full, candidate_short = _normalize_hostname(candidate)
+        if not candidate_full and not candidate_short:
+            continue
+        if expected_full in {candidate_full, candidate_short} or expected_short in {candidate_full, candidate_short}:
+            return True
+    return False
+
+
 class AgentLifecycleEventHandler:
     event_types = ("handshake", "heartbeat")
 
@@ -61,6 +81,7 @@ class AgentLifecycleEventHandler:
 
         requested_client_id = event.data.client_id
         reported_hostname = str(getattr(event.data, "hostname", "") or "").strip()
+        reported_fqdn = str(getattr(event.data, "fqdn", "") or "").strip()
         auth_result = await self._registry_db.authorize_agent(requested_client_id, context.auth_token)
         if not auth_result.get("authorized"):
             reason = auth_result.get("reason", "unauthorized")
@@ -89,13 +110,14 @@ class AgentLifecycleEventHandler:
             return False
 
         expected_hostname = await self._registry_db.get_expected_hostname_for_agent(requested_client_id)
-        if expected_hostname and reported_hostname and expected_hostname.lower() != reported_hostname.lower():
-            reason = f"hostname mismatch: expected {expected_hostname}, got {reported_hostname}"
+        if expected_hostname and not _host_matches(expected_hostname, reported_hostname, reported_fqdn):
+            reported_host_display = reported_fqdn or reported_hostname
+            reason = f"hostname mismatch: expected {expected_hostname}, got {reported_host_display}"
             latest_deployment = await self._registry_db.get_latest_deployment_for_agent(requested_client_id)
             if latest_deployment:
                 await self._registry_db.update_deployment(
                     latest_deployment["id"],
-                    error=f"Agent attempted bootstrap from unexpected host '{reported_hostname}'. Expected '{expected_hostname}'.",
+                    error=f"Agent attempted bootstrap from unexpected host '{reported_host_display}'. Expected '{expected_hostname}'.",
                 )
             await self._registry_db.upsert_agent(
                 requested_client_id,
@@ -154,14 +176,15 @@ class AgentLifecycleEventHandler:
         self._agent_runtime.merge_heartbeat(event.data, self._telemetry_db)
         metrics = event.data.system_metrics if hasattr(event.data, "system_metrics") else {}
         hostname = metrics.get("hostname", "") if isinstance(metrics, dict) else ""
+        fqdn = metrics.get("fqdn", "") if isinstance(metrics, dict) else ""
         if context.state.client_id:
             expected_hostname = await self._registry_db.get_expected_hostname_for_agent(context.state.client_id)
-            if expected_hostname and hostname and expected_hostname.lower() != hostname.lower():
+            if expected_hostname and not _host_matches(expected_hostname, hostname, fqdn):
                 logger.warning(
                     "Disconnecting agent %s after heartbeat hostname mismatch: expected %s, got %s",
                     context.state.client_id,
                     expected_hostname,
-                    hostname,
+                    fqdn or hostname,
                 )
                 await self._registry_db.upsert_agent(
                     context.state.client_id,
@@ -175,7 +198,7 @@ class AgentLifecycleEventHandler:
         if context.state.client_id:
             await self._registry_db.upsert_agent(
                 context.state.client_id,
-                hostname=hostname,
+                hostname=expected_hostname or hostname,
                 status="active",
                 connection_status="online",
                 metadata=metrics if isinstance(metrics, dict) else {},
