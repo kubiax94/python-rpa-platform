@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS agents (
     status              TEXT NOT NULL DEFAULT 'registered',
     connection_status   TEXT NOT NULL DEFAULT 'offline',
     current_version     TEXT NOT NULL DEFAULT '',
-    last_deployment_id  TEXT,
+    last_deployment_id  TEXT REFERENCES agent_deployments(id),
     metadata_json       TEXT NOT NULL DEFAULT '{}',
     created_at          INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL,
@@ -44,12 +44,14 @@ CREATE TABLE IF NOT EXISTS agent_credentials (
     secret_hash             TEXT,
     secret_rotated_at       INTEGER,
     token_version           INTEGER NOT NULL DEFAULT 0,
+    created_at              INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     updated_at              INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS agent_deployments (
     id                  TEXT PRIMARY KEY,
     agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    release_id          TEXT REFERENCES agent_releases(id),
     hostname            TEXT NOT NULL,
     repo_url            TEXT NOT NULL DEFAULT '',
     source_ref          TEXT NOT NULL DEFAULT 'main',
@@ -57,6 +59,7 @@ CREATE TABLE IF NOT EXISTS agent_deployments (
     status              TEXT NOT NULL DEFAULT 'queued',
     task_id             TEXT,
     commit_sha          TEXT NOT NULL DEFAULT '',
+    tag_name            TEXT NOT NULL DEFAULT '',
     artifact_dir        TEXT NOT NULL DEFAULT '',
     artifact_exe_path   TEXT NOT NULL DEFAULT '',
     package_zip_path    TEXT NOT NULL DEFAULT '',
@@ -73,6 +76,42 @@ CREATE TABLE IF NOT EXISTS agent_deployments (
 
 CREATE INDEX IF NOT EXISTS idx_deployments_agent ON agent_deployments(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deployments_status ON agent_deployments(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_releases (
+    id                  TEXT PRIMARY KEY,
+    version             TEXT NOT NULL,
+    tag_name            TEXT NOT NULL DEFAULT '',
+    commit_sha          TEXT NOT NULL,
+    artifact_url        TEXT NOT NULL,
+    artifact_sha256     TEXT NOT NULL,
+    workflow_run_id     TEXT,
+    created_at          INTEGER NOT NULL,
+    published_at        INTEGER,
+    metadata_json       TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_releases_version ON agent_releases(version);
+CREATE INDEX IF NOT EXISTS idx_releases_published ON agent_releases(published_at DESC, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_update_jobs (
+    id                  TEXT PRIMARY KEY,
+    agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    deployment_id       TEXT REFERENCES agent_deployments(id),
+    from_release_id     TEXT REFERENCES agent_releases(id),
+    to_release_id       TEXT REFERENCES agent_releases(id),
+    status              TEXT NOT NULL DEFAULT 'queued',
+    requested_by        TEXT NOT NULL DEFAULT 'user',
+    task_id             TEXT,
+    error               TEXT,
+    created_at          INTEGER NOT NULL,
+    started_at          INTEGER,
+    completed_at        INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_update_jobs_agent ON agent_update_jobs(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_update_jobs_status ON agent_update_jobs(status, created_at DESC);
+
+
 """
 
 
@@ -115,12 +154,19 @@ class AgentRegistryDB:
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(SCHEMA)
+        await self._ensure_column("agents", "last_deployment_id", "TEXT")
         await self._ensure_column("agent_deployments", "repo_url", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column("agent_deployments", "release_id", "TEXT")
         await self._ensure_column("agent_deployments", "task_id", "TEXT")
+        await self._ensure_column("agent_deployments", "tag_name", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column("agent_deployments", "artifact_dir", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column("agent_deployments", "artifact_exe_path", "TEXT NOT NULL DEFAULT ''")
         await self._ensure_column("agent_deployments", "installer_copy_path", "TEXT NOT NULL DEFAULT ''")
         await self._ensure_column("agent_deployments", "package_zip_path", "TEXT NOT NULL DEFAULT ''")
         await self._ensure_column("agent_deployments", "metadata_json", "TEXT NOT NULL DEFAULT '{}' ")
+        await self._ensure_column("agent_deployments", "build_log", "TEXT NOT NULL DEFAULT ''")
         await self._ensure_column("agent_credentials", "token_version", "INTEGER NOT NULL DEFAULT 0")
+        await self._ensure_column("agent_releases", "tag_name", "TEXT NOT NULL DEFAULT ''")
         await self._db.commit()
         logger.info("AgentRegistryDB started: %s", self._db_path)
 
@@ -378,6 +424,8 @@ class AgentRegistryDB:
         source_ref: str,
         requested_by: str,
         task_id: str,
+        *,
+        release_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ):
         if not self._db:
@@ -386,10 +434,10 @@ class AgentRegistryDB:
         now = int(time.time())
         await self._db.execute(
             """
-            INSERT INTO agent_deployments (id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, status, metadata_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+            INSERT INTO agent_deployments (id, release_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, status, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
             """,
-            (deployment_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, _serialize_metadata(metadata), now),
+            (deployment_id, release_id, agent_id, hostname, repo_url, source_ref, requested_by, task_id, _serialize_metadata(metadata), now),
         )
         await self._db.commit()
         await self.upsert_agent(agent_id, hostname=hostname, last_deployment_id=deployment_id)
@@ -397,10 +445,12 @@ class AgentRegistryDB:
     async def update_deployment(
         self,
         deployment_id: str,
+        release_id: str | None = None,
         *,
         status: str | None = None,
         task_id: str | None = None,
         commit_sha: str | None = None,
+        tag_name: str | None = None,
         artifact_dir: str | None = None,
         artifact_exe_path: str | None = None,
         package_zip_path: str | None = None,
@@ -421,7 +471,9 @@ class AgentRegistryDB:
         for name, value in (
             ("status", status),
             ("task_id", task_id),
+            ("release_id", release_id),
             ("commit_sha", commit_sha),
+            ("tag_name", tag_name),
             ("artifact_dir", artifact_dir),
             ("artifact_exe_path", artifact_exe_path),
             ("package_zip_path", package_zip_path),
@@ -449,6 +501,270 @@ class AgentRegistryDB:
         params.append(deployment_id)
         await self._db.execute(f"UPDATE agent_deployments SET {', '.join(fields)} WHERE id = ?", params)
         await self._db.commit()
+
+    async def upsert_release_from_source(
+        self,
+        *,
+        version: str,
+        commit_sha: str,
+        artifact_url: str,
+        artifact_sha256: str,
+        tag_name: str = "",
+        workflow_run_id: str | None = None,
+        published_at: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        release_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not self._db:
+            return None
+
+        now = int(time.time())
+        existing = None
+        if release_id:
+            existing = await self.get_release(release_id)
+        if existing is None and tag_name:
+            existing = await self.get_release_by_tag(tag_name)
+        if existing is None:
+            existing = await self.get_release_by_version(version)
+
+        resolved_release_id = release_id or (existing.get("id") if existing else None) or uuid.uuid4().hex
+        created_at = int(existing.get("created_at") or now) if existing else now
+        merged_metadata = _merge_metadata(existing.get("metadata") if existing else {}, metadata)
+
+        await self._db.execute(
+            """
+            INSERT INTO agent_releases (
+                id,
+                version,
+                tag_name,
+                commit_sha,
+                artifact_url,
+                artifact_sha256,
+                workflow_run_id,
+                created_at,
+                published_at,
+                metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                version = excluded.version,
+                tag_name = excluded.tag_name,
+                commit_sha = excluded.commit_sha,
+                artifact_url = excluded.artifact_url,
+                artifact_sha256 = excluded.artifact_sha256,
+                workflow_run_id = excluded.workflow_run_id,
+                published_at = excluded.published_at,
+                metadata_json = excluded.metadata_json
+            """,
+            (
+                resolved_release_id,
+                version,
+                tag_name,
+                commit_sha,
+                artifact_url,
+                artifact_sha256,
+                workflow_run_id,
+                created_at,
+                published_at,
+                _serialize_metadata(merged_metadata),
+            ),
+        )
+        await self._db.commit()
+        return await self.get_release(resolved_release_id)
+
+    async def get_release(self, release_id: str) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+        async with self._db.execute("SELECT * FROM agent_releases WHERE id = ?", (release_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            columns = [d[0] for d in cursor.description]
+            result = dict(zip(columns, row))
+            result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+            return result
+
+    async def get_release_by_version(self, version: str) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+        async with self._db.execute(
+            "SELECT * FROM agent_releases WHERE version = ? ORDER BY published_at DESC, created_at DESC LIMIT 1",
+            (version,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            columns = [d[0] for d in cursor.description]
+            result = dict(zip(columns, row))
+            result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+            return result
+
+    async def get_release_by_tag(self, tag_name: str) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+        async with self._db.execute(
+            "SELECT * FROM agent_releases WHERE tag_name = ? ORDER BY published_at DESC, created_at DESC LIMIT 1",
+            (tag_name,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            columns = [d[0] for d in cursor.description]
+            result = dict(zip(columns, row))
+            result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+            return result
+
+    async def get_latest_release(self) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+        async with self._db.execute(
+            "SELECT * FROM agent_releases ORDER BY published_at DESC, created_at DESC LIMIT 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            columns = [d[0] for d in cursor.description]
+            result = dict(zip(columns, row))
+            result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+            return result
+
+    async def get_releases(self, limit: int = 100) -> list[dict[str, Any]]:
+        if not self._db:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        async with self._db.execute(
+            "SELECT * FROM agent_releases ORDER BY published_at DESC, created_at DESC LIMIT ?",
+            (limit,),
+        ) as cursor:
+            columns = [d[0] for d in cursor.description]
+            async for row in cursor:
+                result = dict(zip(columns, row))
+                result["metadata"] = _deserialize_metadata(result.pop("metadata_json", "{}"))
+                rows.append(result)
+        return rows
+
+    async def create_update_job(
+        self,
+        *,
+        agent_id: str,
+        requested_by: str,
+        deployment_id: str | None = None,
+        from_release_id: str | None = None,
+        to_release_id: str | None = None,
+        task_id: str | None = None,
+        status: str = "queued",
+        error: str | None = None,
+        job_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not self._db:
+            return None
+
+        now = int(time.time())
+        resolved_job_id = job_id or uuid.uuid4().hex
+        await self._db.execute(
+            """
+            INSERT INTO agent_update_jobs (
+                id,
+                agent_id,
+                deployment_id,
+                from_release_id,
+                to_release_id,
+                status,
+                requested_by,
+                task_id,
+                error,
+                created_at,
+                started_at,
+                completed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            """,
+            (
+                resolved_job_id,
+                agent_id,
+                deployment_id,
+                from_release_id,
+                to_release_id,
+                status,
+                requested_by,
+                task_id,
+                error,
+                now,
+            ),
+        )
+        await self._db.commit()
+        return await self.get_update_job(resolved_job_id)
+
+    async def update_update_job(
+        self,
+        job_id: str,
+        *,
+        deployment_id: str | None = None,
+        from_release_id: str | None = None,
+        to_release_id: str | None = None,
+        status: str | None = None,
+        requested_by: str | None = None,
+        task_id: str | None = None,
+        error: str | None = None,
+        started_at: int | None = None,
+        completed_at: int | None = None,
+    ) -> None:
+        if not self._db:
+            return
+
+        fields: list[str] = []
+        params: list[Any] = []
+        for name, value in (
+            ("deployment_id", deployment_id),
+            ("from_release_id", from_release_id),
+            ("to_release_id", to_release_id),
+            ("status", status),
+            ("requested_by", requested_by),
+            ("task_id", task_id),
+            ("error", error),
+            ("started_at", started_at),
+            ("completed_at", completed_at),
+        ):
+            if value is not None:
+                fields.append(f"{name} = ?")
+                params.append(value)
+
+        if not fields:
+            return
+
+        params.append(job_id)
+        await self._db.execute(f"UPDATE agent_update_jobs SET {', '.join(fields)} WHERE id = ?", params)
+        await self._db.commit()
+
+    async def get_update_job(self, job_id: str) -> Optional[dict[str, Any]]:
+        if not self._db:
+            return None
+        async with self._db.execute("SELECT * FROM agent_update_jobs WHERE id = ?", (job_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            columns = [d[0] for d in cursor.description]
+            return dict(zip(columns, row))
+
+    async def get_update_jobs(self, agent_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if not self._db:
+            return []
+
+        query = "SELECT * FROM agent_update_jobs WHERE 1=1"
+        params: list[Any] = []
+        if agent_id:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows: list[dict[str, Any]] = []
+        async with self._db.execute(query, params) as cursor:
+            columns = [d[0] for d in cursor.description]
+            async for row in cursor:
+                rows.append(dict(zip(columns, row)))
+        return rows
 
     async def get_agent(self, agent_id: str) -> Optional[dict[str, Any]]:
         if not self._db:
@@ -558,3 +874,10 @@ class AgentRegistryDB:
 
         deployment = await self.get_latest_deployment_for_agent(agent_id)
         return str((deployment or {}).get("hostname") or "").strip()
+    
+    async def delete_agent(self, agent_id: str):
+        if not self._db:
+            return
+        await self._db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+        await self._db.commit()
+    

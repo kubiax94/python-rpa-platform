@@ -2,6 +2,9 @@ name: Build Windows Agent
 
 on:
   workflow_dispatch:
+  release:
+    types:
+      - published
   push:
     branches:
       - main
@@ -10,6 +13,9 @@ on:
       - shared/**
       - agent_service.spec
       - pyproject.toml
+
+permissions:
+  contents: write
 
 jobs:
   build-agent:
@@ -45,8 +51,30 @@ jobs:
             throw "dist/agent_service.exe not found"
           }
 
+      - name: Compute SHA256
+        id: checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash "dist/agent_service.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Write checksum file
+        shell: pwsh
+        run: |
+          "${{ steps.checksum.outputs.sha256 }}  agent_service.exe" | Out-File -FilePath "dist/agent_service.exe.sha256" -Encoding ascii
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: agent-service-windows
-          path: dist/agent_service.exe
+          path: |
+            dist/agent_service.exe
+            dist/agent_service.exe.sha256
+
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/agent_service.exe
+            dist/agent_service.exe.sha256
