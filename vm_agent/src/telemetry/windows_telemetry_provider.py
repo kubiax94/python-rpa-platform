@@ -330,6 +330,7 @@ class WindowsTelemetryProvider(ITelemetryProvider):
 
         self._system_snapshot_cache = {
             "hostname": socket.gethostname(),
+            "fqdn": socket.getfqdn(),
             "os_name": platform.system(),
             "os_version": platform.release(),
             "os_build": platform.version(),

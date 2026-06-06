@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 
 from shared.core.event_handler import EventHandler
 from shared.network.events.example_event import AuthResultData, HandshakeData, HandshakeEvent
@@ -31,6 +32,7 @@ class AgentLifecycleHandler(EventHandler):
                         data=HandshakeData(
                             client_id=context.client_id,
                             hostname=str(os.getenv("COMPUTERNAME") or ""),
+                            fqdn=str(socket.getfqdn() or ""),
                             capabilities=["ws"],
                         )
                     )
