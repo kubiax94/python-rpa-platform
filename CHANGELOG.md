@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.1.3...v0.2.0) (2026-06-06)
+
+
+### Features
+
+* **infra:** improve relese automation ([9f56010](https://github.com/kubiax94/python-rpa-platform/commit/9f56010b0a003c2720748f7a7a845cfa57959238))
+* **script:** added script for release changes ([efb5337](https://github.com/kubiax94/python-rpa-platform/commit/efb53376c7673140640c87a96ef5ae285cb44d4c))
+
+
+### Bug Fixes
+
+* **frontend:** login screen, deploy ([f022bd1](https://github.com/kubiax94/python-rpa-platform/commit/f022bd128c44cf740644e5d5bd19fbd80af32955))
+
 ## [0.1.3](https://github.com/kubiax94/python-rpa-platform/compare/v0.1.2...v0.1.3) (2026-06-06)
 
 
