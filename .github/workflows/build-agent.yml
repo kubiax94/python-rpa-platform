@@ -5,6 +5,14 @@ on:
   release:
     types:
       - published
+  push:
+    branches:
+      - main
+    paths:
+      - vm_agent/**
+      - shared/**
+      - agent_service.spec
+      - pyproject.toml
 
 permissions:
   contents: write
