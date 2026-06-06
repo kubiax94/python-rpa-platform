@@ -6,6 +6,82 @@ import os
 import sys
 import traceback
 
+try:
+    import win32event
+    import win32service
+    import win32serviceutil
+    import servicemanager
+except ImportError:
+    win32event = None
+    win32service = None
+    win32serviceutil = None
+    servicemanager = None
+
+
+_ServiceFrameworkBase = win32serviceutil.ServiceFramework if win32serviceutil is not None else object
+
+
+class VmAgentService(_ServiceFrameworkBase):
+    _svc_name_ = "VmAgent"
+    _svc_display_name_ = "VM Agent"
+    _svc_description_ = "VM Agent service (LocalSystem) with process management."
+
+    def __init__(self, args):
+        import threading
+
+        if win32serviceutil is None or win32event is None:
+            raise RuntimeError("pywin32 service modules are required to run VmAgentService")
+
+        super().__init__(args)
+        self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
+        self._agent = None
+        self._stop_flag = threading.Event()
+        self._thread = None
+
+    def SvcStop(self):
+        if win32service is None or win32event is None:
+            raise RuntimeError("pywin32 service modules are required to stop VmAgentService")
+
+        self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+        self._stop_flag.set()
+        if self._agent is not None:
+            self._agent.stop()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=10)
+        win32event.SetEvent(self.hWaitStop)
+
+    def SvcDoRun(self):
+        if servicemanager is None or win32service is None:
+            raise RuntimeError("pywin32 service modules are required to run VmAgentService")
+
+        servicemanager.LogInfoMsg("VmAgent service starting...")
+        self.ReportServiceStatus(win32service.SERVICE_RUNNING)
+        try:
+            self._main()
+        except Exception as e:
+            servicemanager.LogErrorMsg(f"VmAgent crashed: {e!r}")
+            raise
+
+    def _main(self):
+        import threading
+
+        from vm_agent.src.core.agent import VmAgent
+
+        if win32event is None or servicemanager is None:
+            raise RuntimeError("pywin32 service modules are required to run VmAgentService")
+
+        try:
+            print("Starting VmAgent service main loop")
+            self._agent = VmAgent()
+            self._thread = threading.Thread(target=self._agent.run, daemon=True)
+            self._thread.start()
+
+            win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
+            servicemanager.LogInfoMsg("VmAgent service stopped")
+        except Exception as e:
+            servicemanager.LogErrorMsg(f"VmAgent crashed: {e!r}")
+            raise
+
 
 def _run_capture_screenshot_helper(argv: list[str]) -> int:
     from vm_agent.src.utils.process_screenshot import capture_desktop, capture_process_window, capture_window_handle
@@ -81,55 +157,8 @@ def _run_resolve_windows_helper(argv: list[str]) -> int:
 
 
 def _run_service(argv: list[str]) -> int:
-    import threading
-    import win32event
-    import win32service
-    import win32serviceutil
-    import servicemanager
-
-    from vm_agent.src.core.agent import VmAgent
-
-    class VmAgentService(win32serviceutil.ServiceFramework):
-        _svc_name_ = "VmAgent"
-        _svc_display_name_ = "VM Agent"
-        _svc_description_ = "VM Agent service (LocalSystem) with process management."
-
-        def __init__(self, args):
-            super().__init__(args)
-            self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
-            self._agent: VmAgent | None = None
-            self._stop_flag = threading.Event()
-            self._thread: threading.Thread | None = None
-
-        def SvcStop(self):
-            self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
-            self._stop_flag.set()
-            self._agent.stop()
-            if self._thread and self._thread.is_alive():
-                self._thread.join(timeout=10)
-            win32event.SetEvent(self.hWaitStop)
-
-        def SvcDoRun(self):
-            servicemanager.LogInfoMsg("VmAgent service starting...")
-            self.ReportServiceStatus(win32service.SERVICE_RUNNING)
-            try:
-                self._main()
-            except Exception as e:
-                servicemanager.LogErrorMsg(f"VmAgent crashed: {e!r}")
-                raise
-
-        def _main(self):
-            try:
-                print("Starting VmAgent service main loop")
-                self._agent = VmAgent()
-                self._thread = threading.Thread(target=self._agent.run, daemon=True)
-                self._thread.start()
-
-                win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
-                servicemanager.LogInfoMsg("VmAgent service stopped")
-            except Exception as e:
-                servicemanager.LogErrorMsg(f"VmAgent crashed: {e!r}")
-                raise
+    if win32serviceutil is None or servicemanager is None:
+        raise RuntimeError("pywin32 service modules are required to run agent_service")
 
     if len(argv) == 0:
         servicemanager.Initialize()
