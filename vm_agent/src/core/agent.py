@@ -2,6 +2,7 @@
 
 import json
 import os
+import socket
 import sys
 import uuid
 from json import JSONDecodeError
@@ -74,18 +75,45 @@ class VmAgent(AgentBus):
         self._window_tracking_enabled: bool = False
         self._sync_sent_for_current_connection: bool = False
 
+    @staticmethod
+    def _normalize_hostname(value: str) -> tuple[str, str]:
+        cleaned = value.strip().rstrip(".").lower()
+        short_name = cleaned.split(".", 1)[0] if cleaned else ""
+        return cleaned, short_name
+
+    @staticmethod
+    def _host_matches(expected_value: str, *candidate_values: str) -> bool:
+        expected_full, expected_short = VmAgent._normalize_hostname(expected_value)
+        if not expected_full and not expected_short:
+            return True
+
+        for candidate in candidate_values:
+            candidate_full, candidate_short = VmAgent._normalize_hostname(candidate)
+            if not candidate_full and not candidate_short:
+                continue
+            if expected_full in {candidate_full, candidate_short} or expected_short in {candidate_full, candidate_short}:
+                return True
+        return False
+
     def _validate_runtime_host(self):
         expected_hostname = str(self._runtime_config.get("hostname") or "").strip()
-        if not expected_hostname:
+        expected_fqdn = str(self._runtime_config.get("fqdn") or "").strip()
+        if not expected_hostname and not expected_fqdn:
             return
 
         local_hostname = str(os.getenv("COMPUTERNAME") or "").strip()
-        if not local_hostname:
+        local_fqdn = ""
+        try:
+            local_fqdn = str(socket.getfqdn() or "").strip()
+        except Exception:
+            local_fqdn = ""
+
+        if not local_hostname and not local_fqdn:
             return
 
-        if expected_hostname.lower() != local_hostname.lower():
+        if not self._host_matches(expected_hostname or expected_fqdn, local_hostname, local_fqdn):
             raise RuntimeError(
-                f"Bootstrap package is bound to host '{expected_hostname}', but the agent is running on '{local_hostname}'."
+                f"Bootstrap package is bound to host '{expected_fqdn or expected_hostname}', but the agent is running on '{local_fqdn or local_hostname}'."
             )
 
     def run(self):
