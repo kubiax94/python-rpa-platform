@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.3](https://github.com/kubiax94/python-rpa-platform/compare/v0.4.2...v0.4.3) (2026-06-06)
+
+
+### Bug Fixes
+
+* **agent:** added FQDN to transport layer ([eae27c4](https://github.com/kubiax94/python-rpa-platform/commit/eae27c4d44b737c0c67f37b663c2410382ee578f))
+* **agent:** added FQDN to transport layer ([1514ad8](https://github.com/kubiax94/python-rpa-platform/commit/1514ad89e9c73ed6a17df82e05682e68b37c5aac))
+* **server:** added FQDN to transport layer ([a9d6f65](https://github.com/kubiax94/python-rpa-platform/commit/a9d6f650a2a942ef9916c7f5320c70cf13f5c63c))
+
 ## [0.4.2](https://github.com/kubiax94/python-rpa-platform/compare/v0.4.1...v0.4.2) (2026-06-06)
 
 
