@@ -23,20 +23,20 @@ jobs:
         shell: pwsh
         run: |
           py --list
-          py -3.13 --version
+          py -3.14 --version
           
 
       - name: Install dependencies
         shell: pwsh
         run: |
-          py -3.13 -m pip install --upgrade pip
-          py -3.13 -m pip install pyinstaller
-          py -3.13 -m pip install -e .
+          py -3.14 -m pip install --upgrade pip
+          py -3.14 -m pip install pyinstaller
+          py -3.14 -m pip install -e .
 
       - name: Build agent_service.exe
         shell: pwsh
         run: |
-          py -3.13 -m PyInstaller --clean agent_service.spec
+          py -3.14 -m PyInstaller --clean agent_service.spec
 
       - name: Verify output
         shell: pwsh
