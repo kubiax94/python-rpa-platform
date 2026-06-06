@@ -78,9 +78,11 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
     return null;
   }
 
+  const hasReleaseOptions = Boolean(config?.releases.length);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-2xl rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl shadow-black/40">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/70 p-4 backdrop-blur-sm sm:p-6">
+      <div className="my-4 w-full max-w-5xl rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl shadow-black/40">
         <div className="flex items-center justify-between border-b border-slate-700 px-5 py-4">
           <div>
             <h2 className="text-lg font-semibold text-slate-100">Prepare Agent Deployment</h2>
@@ -91,7 +93,7 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
           </button>
         </div>
 
-        <div className="grid gap-6 px-5 py-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="grid gap-6 px-5 py-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
           <div className="space-y-4">
             <label className="block text-sm">
               <span className="mb-1 block text-slate-300">Agent ID</span>
@@ -132,8 +134,9 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
                 value={selectedReleaseId}
                 onChange={(event) => setSelectedReleaseId(event.target.value)}
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
+                disabled={!hasReleaseOptions}
               >
-                <option value="">Latest available release</option>
+                <option value="">{hasReleaseOptions ? "Latest available release" : "No deployable release available"}</option>
                 {config?.releases.map((release) => (
                   <option key={release.id} value={release.id}>
                     {(release.tag_name || release.version || release.id) + (release.commit_sha ? ` (${release.commit_sha.slice(0, 12)})` : "")}
@@ -144,6 +147,12 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
                 The server downloads the published `agent_service.exe` asset for the chosen release and generates the bootstrap package around it.
               </span>
             </label>
+
+            {!hasReleaseOptions && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                No deployable release is available yet. GitHub currently exposes only source archives, so this dialog waits for a release containing `agent_service.exe`.
+              </div>
+            )}
 
             {selectedRelease && (
               <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">
@@ -256,7 +265,7 @@ export function DeployAgentDialog({ open, canPrepareDeployment = true, initialAg
             {!canPrepareDeployment && <p className="text-xs text-slate-500">Preparing deployments requires operator role.</p>}
           </div>
 
-          <div className="rounded-xl border border-slate-700 bg-slate-950/60 p-4">
+          <div className="rounded-xl border border-slate-700 bg-slate-950/60 p-4 xl:sticky xl:top-6 xl:self-start">
             <h3 className="text-sm font-semibold text-slate-100">Deployment Status</h3>
             {!deployment && <p className="mt-3 text-sm text-slate-500">Submit the form to start a background release packaging job.</p>}
 
