@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.3.0...v0.4.0) (2026-06-06)
+
+
+### Features
+
+* **infra:** added pat for releases ([ba9b294](https://github.com/kubiax94/python-rpa-platform/commit/ba9b294381c31d1107f3eb5d53000f4a822c58a3))
+
 ## [0.3.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.2.0...v0.3.0) (2026-06-06)
 
 
