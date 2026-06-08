@@ -23,6 +23,7 @@ declare module "guacamole-common-js" {
 
   interface GuacamoleOutputStream {
     index: number;
+    sendBlob(data: string): void;
     sendEnd(): void;
   }
 
@@ -43,16 +44,33 @@ declare module "guacamole-common-js" {
     onend?: (() => void) | null;
   }
 
+  interface GuacamoleBlobWriter {
+    onack?: ((status: GuacamoleStatus) => void) | null;
+    oncomplete?: ((blob: Blob) => void) | null;
+    onprogress?: ((blob: Blob, offset: number) => void) | null;
+    sendBlob(blob: Blob): void;
+    sendEnd(): void;
+  }
+
+  interface GuacamoleBlobReader {
+    onprogress?: ((length: number) => void) | null;
+    onend?: (() => void) | null;
+    getLength(): number;
+    getBlob(): Blob;
+  }
+
   interface GuacamoleClient {
     onstatechange?: ((state: number) => void) | null;
     onerror?: ((status: GuacamoleStatus) => void) | null;
     onrequired?: ((parameters: string[]) => void) | null;
     onargv?: ((stream: GuacamoleInputStream, mimetype: string, name: string) => void) | null;
     onclipboard?: ((stream: GuacamoleInputStream, mimetype: string) => void) | null;
+    onfile?: ((stream: GuacamoleInputStream, mimetype: string, filename: string) => void) | null;
     connect(data?: string): void;
     disconnect(): void;
     getDisplay(): GuacamoleDisplay;
     createArgumentValueStream(mimetype: string, name: string): GuacamoleOutputStream;
+    createFileStream(mimetype: string, filename: string): GuacamoleOutputStream;
     createClipboardStream(mimetype: string): GuacamoleOutputStream;
     sendMouseState(state: unknown, applyDisplayScale?: boolean): void;
     sendKeyEvent(pressed: number, keysym: number): void;
@@ -107,6 +125,8 @@ declare module "guacamole-common-js" {
     ChainedTunnel: new (...tunnels: GuacamoleTunnel[]) => GuacamoleTunnel;
     Mouse: GuacamoleMouseConstructor;
     Keyboard: new (target: Document | HTMLElement) => GuacamoleKeyboard;
+    BlobReader: new (stream: GuacamoleInputStream, mimetype: string) => GuacamoleBlobReader;
+    BlobWriter: new (stream: GuacamoleOutputStream) => GuacamoleBlobWriter;
     StringWriter: new (stream: GuacamoleOutputStream) => GuacamoleStringWriter;
     StringReader: new (stream: GuacamoleInputStream) => GuacamoleStringReader;
     SessionRecording: new (recordingBlob: Blob | GuacamoleTunnel) => {

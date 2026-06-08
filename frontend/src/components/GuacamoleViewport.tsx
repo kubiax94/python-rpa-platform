@@ -72,11 +72,15 @@ export function GuacamoleViewport({
   const keyboardCaptureEnabledRef = useRef(false);
   const keyboardRef = useRef<InstanceType<typeof Guacamole.Keyboard> | null>(null);
   const clientRef = useRef<InstanceType<typeof Guacamole.Client> | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const downloadUrlRef = useRef<string | null>(null);
   const clipboardCleanupRef = useRef<(() => void) | null>(null);
   const tunnelRef = useRef<InstanceType<typeof Guacamole.HTTPTunnel> | InstanceType<typeof Guacamole.WebSocketTunnel> | InstanceType<typeof Guacamole.ChainedTunnel> | null>(null);
   const exportingDisplayStateRef = useRef(false);
   const [reconnectRequestId, setReconnectRequestId] = useState(0);
   const [requiredPrompt, setRequiredPrompt] = useState<RequiredPromptState | null>(null);
+  const [fileTransferState, setFileTransferState] = useState<{ name: string; status: "idle" | "uploading" | "done" | "error"; message?: string } | null>(null);
+  const [dragActive, setDragActive] = useState(false);
 
   useEffect(() => {
     sessionSnapshotRef.current = {
@@ -280,6 +284,93 @@ export function GuacamoleViewport({
     focusTarget?.focus({ preventScroll: true });
   }, [debugLog]);
 
+  const transferFile = useCallback((file: File) => {
+    const client = clientRef.current;
+    if (!client || !activeRef.current || session.readOnly) {
+      setFileTransferState({
+        name: file.name,
+        status: "error",
+        message: "File transfer is only available in an active interactive session.",
+      });
+      return;
+    }
+
+    try {
+      const stream = client.createFileStream(file.type || "application/octet-stream", file.name);
+      const writer = new Guacamole.BlobWriter(stream);
+      setFileTransferState({
+        name: file.name,
+        status: "uploading",
+        message: "Uploading to the remote session...",
+      });
+
+      writer.onack = (status) => {
+        if ((status.code ?? 0) >= 0x0100) {
+          setFileTransferState({
+            name: file.name,
+            status: "error",
+            message: status.message || "Remote file transfer was rejected.",
+          });
+        }
+      };
+      writer.oncomplete = () => {
+        setFileTransferState({
+          name: file.name,
+          status: "done",
+          message: "Upload completed.",
+        });
+      };
+
+      writer.sendBlob(file);
+    } catch (error) {
+      setFileTransferState({
+        name: file.name,
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [session.readOnly]);
+
+  const handleSelectedFiles = useCallback((files: FileList | null) => {
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    transferFile(files[0]);
+  }, [transferFile]);
+
+  const handleDroppedFiles = useCallback((files: FileList | null) => {
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    transferFile(files[0]);
+  }, [transferFile]);
+
+  const triggerBrowserDownload = useCallback((blob: Blob, filename: string) => {
+    if (downloadUrlRef.current) {
+      URL.revokeObjectURL(downloadUrlRef.current);
+      downloadUrlRef.current = null;
+    }
+
+    const nextUrl = URL.createObjectURL(blob);
+    downloadUrlRef.current = nextUrl;
+
+    const link = document.createElement("a");
+    link.href = nextUrl;
+    link.download = filename || "guacamole-download";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    window.setTimeout(() => {
+      if (downloadUrlRef.current === nextUrl) {
+        URL.revokeObjectURL(nextUrl);
+        downloadUrlRef.current = null;
+      }
+    }, 1000);
+  }, []);
+
   const maintainCaptureAfterBlur = useCallback((reason: string) => {
     if (!activeRef.current || !hasConnectedRef.current || !keyboardCaptureEnabledRef.current) {
       return;
@@ -330,6 +421,10 @@ export function GuacamoleViewport({
     resizeObserverRef.current = null;
     clipboardCleanupRef.current?.();
     clipboardCleanupRef.current = null;
+    if (downloadUrlRef.current) {
+      URL.revokeObjectURL(downloadUrlRef.current);
+      downloadUrlRef.current = null;
+    }
 
     if (clientRef.current && shouldDisconnectTransport) {
       clientRef.current.disconnect();
@@ -1044,6 +1139,33 @@ export function GuacamoleViewport({
       };
     };
 
+    client.onfile = (stream, mimetype, filename) => {
+      if (!isCurrentConnection()) {
+        return;
+      }
+
+      const reader = new Guacamole.BlobReader(stream, mimetype || "application/octet-stream");
+      setFileTransferState({
+        name: filename || "remote-file",
+        status: "uploading",
+        message: "Receiving file from the remote session...",
+      });
+
+      reader.onend = () => {
+        if (!isCurrentConnection()) {
+          return;
+        }
+
+        const blob = reader.getBlob();
+        triggerBrowserDownload(blob, filename || "guacamole-download");
+        setFileTransferState({
+          name: filename || "remote-file",
+          status: "done",
+          message: "Download completed.",
+        });
+      };
+    };
+
     const handlePaste = (event: ClipboardEvent) => {
       if (!isCurrentConnection() || !activeRef.current || session.readOnly) {
         return;
@@ -1429,11 +1551,91 @@ export function GuacamoleViewport({
     };
   }, [active, debugLog, maintainCaptureAfterBlur, setKeyboardCaptureEnabled]);
 
+  useEffect(() => {
+    if (!fileTransferState || fileTransferState.status === "uploading") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setFileTransferState((current) => current === fileTransferState ? null : current);
+    }, 4000);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [fileTransferState]);
+
+  useEffect(() => {
+    return () => {
+      if (downloadUrlRef.current) {
+        URL.revokeObjectURL(downloadUrlRef.current);
+        downloadUrlRef.current = null;
+      }
+    };
+  }, []);
+
   return (
     <div className="relative h-full w-full">
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-2">
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="hidden"
+          onChange={(event) => {
+            handleSelectedFiles(event.target.files);
+            event.currentTarget.value = "";
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={!active || !session.connected || session.readOnly}
+          className="rounded-md border border-slate-700/80 bg-slate-900/85 px-3 py-1.5 text-xs font-medium text-slate-100 shadow-sm transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Send File
+        </button>
+      </div>
+      {fileTransferState && (
+        <div className="absolute left-3 top-3 z-10 max-w-xs rounded-md border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-xs text-slate-200 shadow-lg">
+          <div className="font-medium text-slate-100">{fileTransferState.name}</div>
+          <div className={fileTransferState.status === "error" ? "mt-1 text-rose-300" : "mt-1 text-slate-300"}>
+            {fileTransferState.message || (fileTransferState.status === "uploading" ? "Uploading..." : "Ready")}
+          </div>
+        </div>
+      )}
       <div
         ref={displayHostRef}
         tabIndex={0}
+        onDragEnter={(event) => {
+          event.preventDefault();
+          if (!active || !session.connected || session.readOnly) {
+            return;
+          }
+          setDragActive(true);
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+          if (!active || !session.connected || session.readOnly) {
+            return;
+          }
+          event.dataTransfer.dropEffect = "copy";
+          setDragActive(true);
+        }}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            return;
+          }
+          setDragActive(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragActive(false);
+          if (!active || !session.connected || session.readOnly) {
+            return;
+          }
+          handleDroppedFiles(event.dataTransfer.files);
+        }}
         onMouseDown={() => {
           if (active) {
             setKeyboardCaptureEnabled(true, "viewport-mousedown");
@@ -1442,6 +1644,11 @@ export function GuacamoleViewport({
         }}
         className="absolute inset-0 overflow-hidden bg-slate-950 select-none outline-none"
       />
+      {dragActive && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center border-2 border-dashed border-cyan-400/70 bg-cyan-500/10 text-sm font-medium text-cyan-100 backdrop-blur-[1px]">
+          Drop file to send to remote session
+        </div>
+      )}
       {requiredPrompt && (
         <GuacamoleRequiredPrompt
           parameters={requiredPrompt.parameters}

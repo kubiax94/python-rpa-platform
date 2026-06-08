@@ -195,6 +195,10 @@ class AgentRuntime:
                 }
             else:
                 current_procs = target.setdefault("processes", {})
+                incoming_process_count = session_data.get("process_count")
+                if not incoming_procs and incoming_process_count == 0:
+                    current_procs.clear()
+                    continue
                 for pid, proc_info in incoming_procs.items():
                     pid_str = str(pid)
                     if isinstance(proc_info, dict) and proc_info.get("is_running") is False:
