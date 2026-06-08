@@ -6,6 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from http.cookies import SimpleCookie
 from pathlib import Path
+from typing import Literal
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,7 +27,7 @@ from vm_agent_server.src.api.routers.task_router import build_task_router
 from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB
 from vm_agent_server.src.add_trust_rdp_host import add_trusted_rdp_host, disable_rdp_publisher_warning
 from vm_agent_server.src.agent_runtime import AgentRuntime, HEARTBEAT_TIMEOUT_SECONDS
-from vm_agent_server.src.guacamole.bridge import build_guacamole_proxy_tunnel_urls, build_guacamole_session, create_guacamole_client_session, get_guacamole_config, get_guacamole_request_base_url, inspect_guacamole_connection, invalidate_guacamole_token, list_guacamole_connections, set_guacamole_settings_provider
+from vm_agent_server.src.guacamole.bridge import build_guacamole_proxy_tunnel_urls, build_guacamole_session, create_guacamole_client_session, get_guacamole_config, get_guacamole_request_base_url, inspect_guacamole_connection, invalidate_guacamole_token, list_guacamole_connections, provision_guacamole_agent_target_with_diagnostics, set_guacamole_settings_provider
 from vm_agent_server.src.network.agent_session import run_agent_ws_session
 from vm_agent_server.src.network.context import AgentSessionDependencies, FrontendSessionDependencies
 from vm_agent_server.src.network.frontend_session import run_frontend_ws_session
@@ -73,9 +74,21 @@ guacamole_service = GuacamoleService(
 )
 
 
+class AgentGuacamoleFileTransferUpdateRequest(BaseModel):
+    upload_enabled: bool | None = None
+    download_enabled: bool | None = None
+
+
+class AgentGuacamoleAccessUpdateRequest(BaseModel):
+    minimum_role: Literal["viewer", "operator", "admin"] | None = None
+    interactive_minimum_role: Literal["viewer", "operator", "admin"] | None = None
+    file_transfer: AgentGuacamoleFileTransferUpdateRequest | None = None
+
+
 class AgentRegistryUpdateRequest(BaseModel):
     hostname: str | None = None
     display_name: str | None = None
+    guacamole_access: AgentGuacamoleAccessUpdateRequest | None = None
 
 
 def _is_benign_connection_reset(context: dict[str, object]) -> bool:
@@ -574,8 +587,34 @@ async def api_update_agent_registry_item(agent_id: str, body: AgentRegistryUpdat
 
     hostname = body.hostname.strip() if isinstance(body.hostname, str) else ""
     display_name = body.display_name.strip() if isinstance(body.display_name, str) else ""
-    await registry_db.upsert_agent(agent_id, hostname=hostname, display_name=display_name)
+    metadata = None
+    if body.guacamole_access is not None:
+        metadata = {
+            "guacamole": {
+                "access": body.guacamole_access.model_dump(mode="python", exclude_none=True),
+            },
+        }
+
+    await registry_db.upsert_agent(agent_id, hostname=hostname, display_name=display_name, metadata=metadata)
     updated = await registry_db.get_agent(agent_id)
+
+    if updated:
+        updated_metadata = updated.get("metadata") if isinstance(updated.get("metadata"), dict) else {}
+        guacamole_mapping = updated_metadata.get("guacamole") if isinstance(updated_metadata.get("guacamole"), dict) else {}
+        if guacamole_mapping:
+            provision_hostname = str(updated.get("hostname") or guacamole_mapping.get("target_host") or agent_id).strip() or agent_id
+            try:
+                refreshed_mapping, _ = await asyncio.to_thread(
+                    provision_guacamole_agent_target_with_diagnostics,
+                    agent_id,
+                    provision_hostname,
+                    guacamole_mapping,
+                )
+                await registry_db.upsert_agent(agent_id, metadata={"guacamole": refreshed_mapping})
+                updated = await registry_db.get_agent(agent_id)
+            except Exception as error:
+                logger.warning("Failed to reprovision Guacamole connection for agent %s after registry update: %s", agent_id, error)
+
     return JSONResponse(updated or {"id": agent_id})
 
 

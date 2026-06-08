@@ -8,7 +8,8 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vm_agent_server.src.api.schemas.deployment_responses import GenericStatusResponse, GuacamoleConfigResponse, GuacamoleRecordingsResponse, GuacamoleSessionStatusResponse
-from vm_agent_server.src.authz import request_has_minimum_role, role_required_response
+from vm_agent_server.src.authz import has_minimum_role, request_has_minimum_role, role_required_response
+from vm_agent_server.src.guacamole.access_policy import extract_guacamole_access_policy
 from vm_agent_server.src.guacamole.bridge import list_guacamole_recordings, list_vm_user_sessions, open_guacamole_recording
 from vm_agent_server.src.services.guacamole_service import GuacamoleService
 from vm_agent_server.src.users.service import UserService
@@ -182,13 +183,17 @@ def build_guacamole_router(
         read_only: bool = Query(False),
         recorded: bool = Query(False),
     ):
-        if not request_has_minimum_role(request, "operator"):
-            return role_required_response("operator")
         state = await build_agent_context(agent_id)
         if state is None:
             return JSONResponse({"error": "Not found"}, status_code=404)
 
-        enforced_read_only = read_only or not request_has_minimum_role(request, "admin")
+        request_user = getattr(getattr(request.state, "user_session", None), "user", None)
+        request_roles = getattr(request_user, "roles", [])
+        access_policy = extract_guacamole_access_policy(state)
+        if not has_minimum_role(request_roles, access_policy["minimum_role"]):
+            return role_required_response(access_policy["minimum_role"])
+
+        enforced_read_only = read_only or not has_minimum_role(request_roles, access_policy["interactive_minimum_role"])
         if recorded:
             enforced_read_only = True
 

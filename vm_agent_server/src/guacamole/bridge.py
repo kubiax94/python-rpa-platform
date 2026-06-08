@@ -14,6 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from vm_agent_server.src.guacamole.access_policy import extract_guacamole_access_policy, normalize_guacamole_access_policy
 from vm_agent_server.src.guacamole.mapping import build_agent_guacamole_mapping
 
 
@@ -1081,6 +1082,7 @@ def _resolve_target(agent_id: str, agent_state: dict[str, Any] | None) -> dict[s
     auth = _get_auth_config()
     display = _get_display_config()
     recording = _get_recording_config()
+    access_policy = extract_guacamole_access_policy(agent_state)
     tunnel_urls = _get_tunnel_urls(base_url)
 
     warnings: list[str] = []
@@ -1117,6 +1119,7 @@ def _resolve_target(agent_id: str, agent_state: dict[str, Any] | None) -> dict[s
             "exclude_touch": bool(recording["exclude_touch"]),
             "include_keys": bool(recording["include_keys"]),
         },
+        "access": access_policy,
         "guacamole_mapping": guacamole_mapping,
         "resolved_fields": {
             "hostname": hostname,
@@ -1565,6 +1568,8 @@ def _build_guacamole_connection_payload(
 ) -> dict[str, Any]:
     provisioning = _get_provisioning_config()
     recording = _get_recording_config()
+    access_policy = normalize_guacamole_access_policy(mapping.get("access"))
+    file_transfer = access_policy.get("file_transfer") if isinstance(access_policy.get("file_transfer"), dict) else {}
     values = _build_guacamole_template_values(agent_id, mapping, hostname, template_values)
     template_parameters = _render_template_value(
         _decode_template_json(provisioning["parameter_template_json"]),
@@ -1588,6 +1593,21 @@ def _build_guacamole_connection_payload(
     if domain:
         parameters["domain"] = domain
     parameters.update(_normalize_string_dict(template_parameters if isinstance(template_parameters, dict) else {}))
+
+    upload_enabled = bool(file_transfer.get("upload_enabled", True))
+    download_enabled = bool(file_transfer.get("download_enabled", True))
+    if upload_enabled or download_enabled:
+        parameters["enable-drive"] = "true"
+        parameters["create-drive-path"] = "true"
+        parameters["drive-path"] = _clean_string(parameters.get("drive-path")) or "/drive"
+        parameters["disable-upload"] = "false" if upload_enabled else "true"
+        parameters["disable-download"] = "false" if download_enabled else "true"
+    else:
+        parameters["enable-drive"] = "false"
+        parameters["disable-upload"] = "true"
+        parameters["disable-download"] = "true"
+        parameters.pop("create-drive-path", None)
+        parameters.pop("drive-path", None)
 
     for key in _CONNECTION_RECORDING_PARAMETER_KEYS:
         parameters.pop(key, None)
