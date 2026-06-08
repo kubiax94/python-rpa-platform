@@ -1,0 +1,1 @@
+export type AgentTab = "overview" | "processes" | "monitored" | "remote" | "records" | "commands" | "access";
