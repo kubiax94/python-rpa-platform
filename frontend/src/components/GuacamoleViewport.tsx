@@ -127,8 +127,10 @@ export function GuacamoleViewport({
     latestPersistedClientSessionRef.current = session.clientSession ?? null;
   }, [session.clientSession]);
 
-  const uploadAllowed = session.accessPolicy?.file_transfer.upload_enabled !== false;
-  const downloadAllowed = session.accessPolicy?.file_transfer.download_enabled !== false;
+  const effectivePermissions = session.accessPolicy?.effective_permissions ?? {};
+  const uploadAllowed = session.accessPolicy ? effectivePermissions.upload === true : true;
+  const downloadAllowed = session.accessPolicy ? effectivePermissions.download === true : true;
+  const clipboardAllowed = session.accessPolicy ? effectivePermissions.clipboard === true : true;
 
   const getDisplayProfile = (clientSession: NonNullable<GuacamoleClientSession["client_session"]>) => {
     const profile = clientSession.display;
@@ -298,11 +300,11 @@ export function GuacamoleViewport({
       return;
     }
 
-    if (!client || !activeRef.current || session.readOnly) {
+    if (!client || !activeRef.current) {
       setFileTransferState({
         name: file.name,
         status: "error",
-        message: "File transfer is only available in an active interactive session.",
+        message: "File transfer is only available in an active session.",
       });
       return;
     }
@@ -341,7 +343,7 @@ export function GuacamoleViewport({
         message: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [session.readOnly, uploadAllowed]);
+  }, [uploadAllowed]);
 
   const handleSelectedFiles = useCallback((files: FileList | null) => {
     if (!files || files.length === 0) {
@@ -719,11 +721,14 @@ export function GuacamoleViewport({
         status: "ready",
         read_only: session.readOnly,
         access: session.accessPolicy ?? {
-          minimum_role: "operator",
-          interactive_minimum_role: "admin",
-          file_transfer: {
-            upload_enabled: true,
-            download_enabled: true,
+          permissions: {
+            view: { enabled: true, minimum_role: "operator", users: [], groups: [] },
+            interact: { enabled: true, minimum_role: "admin", users: [], groups: [] },
+            clipboard: { enabled: true, minimum_role: "operator", users: [], groups: [] },
+            upload: { enabled: true, minimum_role: "admin", users: [], groups: [] },
+            download: { enabled: true, minimum_role: "admin", users: [], groups: [] },
+            recording: { enabled: true, minimum_role: "operator", users: [], groups: [] },
+            session_kick: { enabled: true, minimum_role: "admin", users: [], groups: [] },
           },
         },
         agent_id: session.agentId,
@@ -1140,7 +1145,7 @@ export function GuacamoleViewport({
     };
 
     client.onclipboard = (stream, mimetype) => {
-      if (!isCurrentConnection() || mimetype !== "text/plain") {
+      if (!isCurrentConnection() || mimetype !== "text/plain" || !clipboardAllowed) {
         return;
       }
 
@@ -1163,7 +1168,7 @@ export function GuacamoleViewport({
     };
 
     client.onfile = (stream, mimetype, filename) => {
-      if (!isCurrentConnection()) {
+      if (!isCurrentConnection() || !downloadAllowed) {
         return;
       }
 
@@ -1190,7 +1195,7 @@ export function GuacamoleViewport({
     };
 
     const handlePaste = (event: ClipboardEvent) => {
-      if (!isCurrentConnection() || !activeRef.current || session.readOnly) {
+      if (!isCurrentConnection() || !activeRef.current || !clipboardAllowed) {
         return;
       }
 
@@ -1612,7 +1617,7 @@ export function GuacamoleViewport({
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={!active || !session.connected || session.readOnly || !uploadAllowed}
+          disabled={!active || !session.connected || !uploadAllowed}
           className="rounded-md border border-slate-700/80 bg-slate-900/85 px-3 py-1.5 text-xs font-medium text-slate-100 shadow-sm transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
           title={!uploadAllowed ? "Upload disabled by agent policy" : undefined}
         >
@@ -1632,14 +1637,14 @@ export function GuacamoleViewport({
         tabIndex={0}
         onDragEnter={(event) => {
           event.preventDefault();
-          if (!active || !session.connected || session.readOnly || !uploadAllowed) {
+          if (!active || !session.connected || !uploadAllowed) {
             return;
           }
           setDragActive(true);
         }}
         onDragOver={(event) => {
           event.preventDefault();
-          if (!active || !session.connected || session.readOnly || !uploadAllowed) {
+          if (!active || !session.connected || !uploadAllowed) {
             return;
           }
           event.dataTransfer.dropEffect = "copy";
@@ -1655,7 +1660,7 @@ export function GuacamoleViewport({
         onDrop={(event) => {
           event.preventDefault();
           setDragActive(false);
-          if (!active || !session.connected || session.readOnly || !uploadAllowed) {
+          if (!active || !session.connected || !uploadAllowed) {
             return;
           }
           handleDroppedFiles(event.dataTransfer.files);
@@ -1673,9 +1678,9 @@ export function GuacamoleViewport({
           Drop file to send to remote session
         </div>
       )}
-      {session.connected && (!uploadAllowed || !downloadAllowed) && (
+      {session.connected && (!uploadAllowed || !downloadAllowed || !clipboardAllowed) && (
         <div className="absolute bottom-3 left-3 z-10 rounded-md border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-[11px] text-slate-300 shadow-lg">
-          Transfer policy: {uploadAllowed ? "upload on" : "upload off"}, {downloadAllowed ? "download on" : "download off"}
+          Session capabilities: clipboard {clipboardAllowed ? "on" : "off"}, upload {uploadAllowed ? "on" : "upload off"}, download {downloadAllowed ? "on" : "off"}
         </div>
       )}
       {requiredPrompt && (
