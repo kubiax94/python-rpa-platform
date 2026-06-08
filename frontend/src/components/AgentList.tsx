@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import { API_BASE, fetchJSON } from "@/lib/auth";
+import type { AgentTab } from "@/components/agent-tabs";
 import type { Task } from "@/hooks/useTaskAPI";
 import { getAgentMetrics, isAgentOnline, type AgentsMap } from "@/types/agent";
 import { ActiveTaskNotifications } from "./ActiveTaskNotifications";
-import { AgentAccessDialog } from "./AgentAccessDialog";
 import { AgentCard } from "./AgentCard";
 import { DeployAgentDialog } from "./DeployAgentDialog";
 
@@ -15,7 +15,7 @@ interface AgentListProps {
   tasks: Task[];
   canPrepareDeployment: boolean;
   canManageAgents: boolean;
-  onSelectAgent: (agentId: string) => void;
+  onSelectAgent: (agentId: string, preferredTab?: AgentTab) => void;
   onOpenTaskTracker: () => void;
   onAgentsChanged?: () => Promise<void> | void;
 }
@@ -24,10 +24,9 @@ export function AgentList({ agents, connected, tasks, canPrepareDeployment, canM
   const agentIds = Object.keys(agents);
   const onlineCount = agentIds.filter((id) => isAgentOnline(agents[id])).length;
   const [deployState, setDeployState] = useState<{ agentId?: string | null; hostname?: string | null; displayName?: string | null } | null>(null);
-  const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
 
   const handleEditAgent = (agentId: string) => {
-    setEditingAgentId(agentId);
+    onSelectAgent(agentId, "access");
   };
 
   const handleDeleteAgent = async (agentId: string) => {
@@ -100,13 +99,6 @@ export function AgentList({ agents, connected, tasks, canPrepareDeployment, canM
         initialHostname={deployState?.hostname}
         initialDisplayName={deployState?.displayName}
         onClose={() => setDeployState(null)}
-      />
-
-      <AgentAccessDialog
-        open={editingAgentId !== null}
-        agentId={editingAgentId}
-        onClose={() => setEditingAgentId(null)}
-        onSaved={onAgentsChanged}
       />
     </div>
   );
