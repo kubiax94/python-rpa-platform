@@ -12,13 +12,18 @@ export interface GuacamoleDisplayProfile {
 
 export type GuacamoleAccessRole = "viewer" | "operator" | "admin";
 
-export interface GuacamoleAccessPolicy {
+export type GuacamolePermissionKey = "view" | "interact" | "clipboard" | "upload" | "download" | "recording" | "session_kick";
+
+export interface GuacamoleAccessRule {
+  enabled: boolean;
   minimum_role: GuacamoleAccessRole;
-  interactive_minimum_role: GuacamoleAccessRole;
-  file_transfer: {
-    upload_enabled: boolean;
-    download_enabled: boolean;
-  };
+  users: string[];
+  groups: string[];
+}
+
+export interface GuacamoleAccessPolicy {
+  permissions: Record<GuacamolePermissionKey, GuacamoleAccessRule>;
+  effective_permissions?: Partial<Record<GuacamolePermissionKey, boolean>>;
 }
 
 export interface GuacamoleConfig {
