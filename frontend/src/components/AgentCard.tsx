@@ -64,7 +64,7 @@ export function AgentCard({ agentId, state, connected, selected, onClick, onDepl
                   }}
                   className="rounded-md border border-slate-600 px-2 py-1 text-[11px] font-medium text-slate-200 hover:border-slate-500 hover:bg-slate-700/60"
                 >
-                  Edit
+                  Policy
                 </button>
               )}
               {onDelete && (
