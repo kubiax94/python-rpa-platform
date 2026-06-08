@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from vm_agent_server.src.api.schemas.deployment_responses import GenericStatusResponse, GuacamoleConfigResponse, GuacamoleRecordingsResponse, GuacamoleSessionStatusResponse
 from vm_agent_server.src.authz import has_minimum_role, request_has_minimum_role, role_required_response
-from vm_agent_server.src.guacamole.access_policy import extract_guacamole_access_policy
+from vm_agent_server.src.guacamole.access_policy import attach_effective_permissions, extract_guacamole_access_policy, has_guacamole_permission
 from vm_agent_server.src.guacamole.bridge import list_guacamole_recordings, list_vm_user_sessions, open_guacamole_recording
 from vm_agent_server.src.services.guacamole_service import GuacamoleService
 from vm_agent_server.src.users.service import UserService
@@ -130,11 +130,14 @@ def build_guacamole_router(
         return {"ok": True, "closed_count": closed_count}
 
     @router.get("/agents/{agent_id}/guacamole")
-    async def api_agent_guacamole(agent_id: str):
+    async def api_agent_guacamole(agent_id: str, request: Request):
         state = await build_agent_context(agent_id)
         if state is None:
             return JSONResponse({"error": "Not found"}, status_code=404)
-        return guacamole_service.build_session(agent_id, state)
+        request_user = getattr(getattr(request.state, "user_session", None), "user", None)
+        session_payload = guacamole_service.build_session(agent_id, state)
+        session_payload["access"] = attach_effective_permissions(extract_guacamole_access_policy(state), request_user)
+        return session_payload
 
     @router.get("/agents/{agent_id}/guacamole/user-sessions")
     async def api_agent_guacamole_user_sessions(agent_id: str, request: Request):
@@ -188,16 +191,17 @@ def build_guacamole_router(
             return JSONResponse({"error": "Not found"}, status_code=404)
 
         request_user = getattr(getattr(request.state, "user_session", None), "user", None)
-        request_roles = getattr(request_user, "roles", [])
         access_policy = extract_guacamole_access_policy(state)
-        if not has_minimum_role(request_roles, access_policy["minimum_role"]):
-            return role_required_response(access_policy["minimum_role"])
+        if not has_guacamole_permission(access_policy, request_user, "view"):
+            return JSONResponse({"error": "Access policy denies remote view for this agent"}, status_code=403)
 
-        enforced_read_only = read_only or not has_minimum_role(request_roles, access_policy["interactive_minimum_role"])
+        enforced_read_only = read_only or not has_guacamole_permission(access_policy, request_user, "interact")
+        if recorded and not has_guacamole_permission(access_policy, request_user, "recording"):
+            return JSONResponse({"error": "Access policy denies recording for this agent"}, status_code=403)
         if recorded:
             enforced_read_only = True
 
-        return await guacamole_service.create_client_session(
+        session_payload = await guacamole_service.create_client_session(
             agent_id,
             state,
             resolve_public_base_url(request),
@@ -210,11 +214,18 @@ def build_guacamole_router(
             read_only=enforced_read_only,
             recorded=recorded,
         )
+        session_payload["access"] = attach_effective_permissions(access_policy, request_user)
+        return session_payload
 
     @router.post("/agents/{agent_id}/guacamole/tracked-sessions/{owner_subject}/kick", response_model=GenericStatusResponse)
     async def api_agent_guacamole_kick_owner_session(agent_id: str, owner_subject: str, request: Request):
-        if not request_has_minimum_role(request, "admin"):
-            return role_required_response("admin")
+        state = await build_agent_context(agent_id)
+        if state is None:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+
+        request_user = getattr(getattr(request.state, "user_session", None), "user", None)
+        if not has_guacamole_permission(extract_guacamole_access_policy(state), request_user, "session_kick"):
+            return JSONResponse({"error": "Access policy denies session kick for this agent"}, status_code=403)
 
         closed = await guacamole_service.close_agent_owner_session(
             agent_id,
