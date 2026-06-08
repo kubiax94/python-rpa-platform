@@ -1569,7 +1569,9 @@ def _build_guacamole_connection_payload(
     provisioning = _get_provisioning_config()
     recording = _get_recording_config()
     access_policy = normalize_guacamole_access_policy(mapping.get("access"))
-    file_transfer = access_policy.get("file_transfer") if isinstance(access_policy.get("file_transfer"), dict) else {}
+    permissions = access_policy.get("permissions") if isinstance(access_policy.get("permissions"), dict) else {}
+    upload_rule = permissions.get("upload") if isinstance(permissions.get("upload"), dict) else {}
+    download_rule = permissions.get("download") if isinstance(permissions.get("download"), dict) else {}
     values = _build_guacamole_template_values(agent_id, mapping, hostname, template_values)
     template_parameters = _render_template_value(
         _decode_template_json(provisioning["parameter_template_json"]),
@@ -1594,8 +1596,8 @@ def _build_guacamole_connection_payload(
         parameters["domain"] = domain
     parameters.update(_normalize_string_dict(template_parameters if isinstance(template_parameters, dict) else {}))
 
-    upload_enabled = bool(file_transfer.get("upload_enabled", True))
-    download_enabled = bool(file_transfer.get("download_enabled", True))
+    upload_enabled = bool(upload_rule.get("enabled", True))
+    download_enabled = bool(download_rule.get("enabled", True))
     if upload_enabled or download_enabled:
         parameters["enable-drive"] = "true"
         parameters["create-drive-path"] = "true"
