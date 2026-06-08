@@ -11,7 +11,7 @@ import {
 import { useGuacamoleWorkspace } from "@/components/GuacamoleWorkspace";
 import type { WorkspaceConnection } from "@/components/guacamole/types";
 import { loadAuthSession } from "@/lib/auth";
-import { hasMinimumRole } from "@/lib/rbac";
+import { formatRoleLabel, hasMinimumRole } from "@/lib/rbac";
 
 interface GuacamolePanelProps {
   agentId: string;
@@ -37,6 +37,10 @@ function formatWorkspaceTime(timestamp?: number) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatTransferState(enabled: boolean): string {
+  return enabled ? "Enabled" : "Disabled";
 }
 
 function buildAvatarLabel(session: GuacamoleVmUserSession) {
@@ -197,8 +201,13 @@ export function GuacamolePanel({ agentId, active = false, canOperate = false }: 
   const [kickInFlightSubject, setKickInFlightSubject] = useState<string | null>(null);
 
   const authSession = loadAuthSession();
-  const canAdmin = hasMinimumRole(authSession?.user.roles, "admin");
-  const operatorReadOnlyOnly = canOperate && !canAdmin;
+  const canViewRemote = canOperate || hasMinimumRole(authSession?.user.roles, "viewer");
+  const accessPolicy = data?.access ?? session?.accessPolicy ?? null;
+  const minimumRole = accessPolicy?.minimum_role ?? "operator";
+  const interactiveMinimumRole = accessPolicy?.interactive_minimum_role ?? "admin";
+  const canOpenRemote = hasMinimumRole(authSession?.user.roles, minimumRole);
+  const canUseInteractive = hasMinimumRole(authSession?.user.roles, interactiveMinimumRole);
+  const operatorReadOnlyOnly = canOpenRemote && !canUseInteractive;
 
   useEffect(() => {
     if (operatorReadOnlyOnly) {
@@ -212,10 +221,14 @@ export function GuacamolePanel({ agentId, active = false, canOperate = false }: 
     return null;
   }
 
-  if (!canOperate) {
+  if (!canViewRemote) {
+    return null;
+  }
+
+  if (!canOpenRemote) {
     return (
       <div className="rounded-xl border border-slate-700 bg-slate-800/30 p-4 text-sm text-slate-400">
-        Remote desktop session control requires operator role.
+        Remote desktop session control requires {formatRoleLabel(minimumRole)} role for this agent.
       </div>
     );
   }
@@ -353,6 +366,10 @@ export function GuacamolePanel({ agentId, active = false, canOperate = false }: 
                 </span>
               </div>
               <InfoRow label="Workspace mode" value={effectiveReadOnly ? "Read-only" : "Interactive"} />
+              <InfoRow label="Access threshold" value={formatRoleLabel(minimumRole)} />
+              <InfoRow label="Interactive threshold" value={formatRoleLabel(interactiveMinimumRole)} />
+              <InfoRow label="File upload" value={formatTransferState(accessPolicy?.file_transfer.upload_enabled !== false)} />
+              <InfoRow label="File download" value={formatTransferState(accessPolicy?.file_transfer.download_enabled !== false)} />
               <InfoRow label="Recording Profile" value={data?.recording?.enabled ? (data.recording.configured ? "Ready for on-demand use" : "Misconfigured") : "Disabled"} />
               <InfoRow label="Session Capture" value={isCurrentAgent ? (session?.recorded ? "Recorded" : "Off") : "-"} />
               <InfoRow label="Connection" value={selectedConnectionName} />
@@ -428,7 +445,7 @@ export function GuacamolePanel({ agentId, active = false, canOperate = false }: 
                 </p>
                 <p className="text-sm text-slate-400">
                   {operatorReadOnlyOnly
-                    ? "Operator access is enforced as read-only. Recorded sessions also stay read-only."
+                    ? `Your role can open this agent only in read-only mode. Interactive control requires ${formatRoleLabel(interactiveMinimumRole)}.`
                     : "The read-only toggle keeps the same remote stream but blocks keyboard and mouse input inside the operator workspace."}
                 </p>
               </div>

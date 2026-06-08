@@ -15,7 +15,7 @@ import { OverviewPanel } from "./OverviewPanel";
 type AgentTab = "overview" | "processes" | "monitored" | "remote" | "records" | "commands";
 
 function sanitizeAgentTab(tab: AgentTab, canOperate: boolean): AgentTab {
-  if (!canOperate && (tab === "commands" || tab === "remote")) {
+  if (!canOperate && tab === "commands") {
     return "overview";
   }
   return tab;
@@ -191,12 +191,12 @@ export function AgentDetail({ agentId, state, tasks, canOperate, sendCommand, la
             <button
               key={tile.tab}
               onClick={() => setActiveTab(sanitizeAgentTab(tile.tab, canOperate))}
-              disabled={(!agentOnline && tile.tab === "commands") || (!canOperate && (tile.tab === "commands" || tile.tab === "remote"))}
+              disabled={(!agentOnline && tile.tab === "commands") || (!canOperate && tile.tab === "commands")}
               className={`p-4 rounded-lg border transition-all text-left ${
                 isActive
                   ? `${c.bg} ${c.border}`
                   : "border-slate-700 bg-slate-800/30 hover:border-slate-600"
-              } ${((!agentOnline && tile.tab === "commands") || (!canOperate && (tile.tab === "commands" || tile.tab === "remote"))) ? "opacity-50 cursor-not-allowed hover:border-slate-700" : ""}`}
+              } ${((!agentOnline && tile.tab === "commands") || (!canOperate && tile.tab === "commands")) ? "opacity-50 cursor-not-allowed hover:border-slate-700" : ""}`}
             >
               <div className="flex items-center gap-2 mb-2">
                 <span className={isActive ? c.text : "text-slate-500"}>{tile.icon}</span>

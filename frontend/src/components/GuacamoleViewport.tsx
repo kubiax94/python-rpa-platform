@@ -127,6 +127,9 @@ export function GuacamoleViewport({
     latestPersistedClientSessionRef.current = session.clientSession ?? null;
   }, [session.clientSession]);
 
+  const uploadAllowed = session.accessPolicy?.file_transfer.upload_enabled !== false;
+  const downloadAllowed = session.accessPolicy?.file_transfer.download_enabled !== false;
+
   const getDisplayProfile = (clientSession: NonNullable<GuacamoleClientSession["client_session"]>) => {
     const profile = clientSession.display;
     if (profile.mode === "fixed" && profile.width && profile.height) {
@@ -286,6 +289,15 @@ export function GuacamoleViewport({
 
   const transferFile = useCallback((file: File) => {
     const client = clientRef.current;
+    if (!uploadAllowed) {
+      setFileTransferState({
+        name: file.name,
+        status: "error",
+        message: "File upload is disabled by the agent policy.",
+      });
+      return;
+    }
+
     if (!client || !activeRef.current || session.readOnly) {
       setFileTransferState({
         name: file.name,
@@ -329,7 +341,7 @@ export function GuacamoleViewport({
         message: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [session.readOnly]);
+  }, [session.readOnly, uploadAllowed]);
 
   const handleSelectedFiles = useCallback((files: FileList | null) => {
     if (!files || files.length === 0) {
@@ -706,6 +718,14 @@ export function GuacamoleViewport({
         configured: true,
         status: "ready",
         read_only: session.readOnly,
+        access: session.accessPolicy ?? {
+          minimum_role: "operator",
+          interactive_minimum_role: "admin",
+          file_transfer: {
+            upload_enabled: true,
+            download_enabled: true,
+          },
+        },
         agent_id: session.agentId,
         source: "persisted",
         connection_id: reusableClientSession.connectionId,
@@ -827,6 +847,7 @@ export function GuacamoleViewport({
         status: sessionData?.status ?? "<none>",
       });
       onUpdate({
+        accessPolicy: sessionData?.access ?? session.accessPolicy,
         status: sessionData?.status ?? "needs_configuration",
         error: sessionData?.warnings?.[0] ?? "No Guacamole session is configured for this agent.",
         clientSession: null,
@@ -851,6 +872,7 @@ export function GuacamoleViewport({
     onUpdate({
       title: resolvedTitle,
       readOnly: Boolean(sessionData?.read_only ?? session.readOnly),
+      accessPolicy: sessionData?.access ?? session.accessPolicy,
       error: null,
       hint: null,
       targetHost: resolvedTargetHost,
@@ -861,6 +883,7 @@ export function GuacamoleViewport({
     persistLatestSessionPatch({
       title: resolvedTitle,
       readOnly: Boolean(sessionData?.read_only ?? session.readOnly),
+      accessPolicy: sessionData?.access ?? session.accessPolicy,
       error: null,
       hint: null,
       targetHost: resolvedTargetHost,
@@ -1589,8 +1612,9 @@ export function GuacamoleViewport({
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={!active || !session.connected || session.readOnly}
+          disabled={!active || !session.connected || session.readOnly || !uploadAllowed}
           className="rounded-md border border-slate-700/80 bg-slate-900/85 px-3 py-1.5 text-xs font-medium text-slate-100 shadow-sm transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          title={!uploadAllowed ? "Upload disabled by agent policy" : undefined}
         >
           Send File
         </button>
@@ -1608,14 +1632,14 @@ export function GuacamoleViewport({
         tabIndex={0}
         onDragEnter={(event) => {
           event.preventDefault();
-          if (!active || !session.connected || session.readOnly) {
+          if (!active || !session.connected || session.readOnly || !uploadAllowed) {
             return;
           }
           setDragActive(true);
         }}
         onDragOver={(event) => {
           event.preventDefault();
-          if (!active || !session.connected || session.readOnly) {
+          if (!active || !session.connected || session.readOnly || !uploadAllowed) {
             return;
           }
           event.dataTransfer.dropEffect = "copy";
@@ -1631,7 +1655,7 @@ export function GuacamoleViewport({
         onDrop={(event) => {
           event.preventDefault();
           setDragActive(false);
-          if (!active || !session.connected || session.readOnly) {
+          if (!active || !session.connected || session.readOnly || !uploadAllowed) {
             return;
           }
           handleDroppedFiles(event.dataTransfer.files);
@@ -1647,6 +1671,11 @@ export function GuacamoleViewport({
       {dragActive && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center border-2 border-dashed border-cyan-400/70 bg-cyan-500/10 text-sm font-medium text-cyan-100 backdrop-blur-[1px]">
           Drop file to send to remote session
+        </div>
+      )}
+      {session.connected && (!uploadAllowed || !downloadAllowed) && (
+        <div className="absolute bottom-3 left-3 z-10 rounded-md border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-[11px] text-slate-300 shadow-lg">
+          Transfer policy: {uploadAllowed ? "upload on" : "upload off"}, {downloadAllowed ? "download on" : "download off"}
         </div>
       )}
       {requiredPrompt && (

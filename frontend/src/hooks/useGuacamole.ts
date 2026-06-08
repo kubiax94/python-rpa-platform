@@ -10,6 +10,17 @@ export interface GuacamoleDisplayProfile {
   dpi: number;
 }
 
+export type GuacamoleAccessRole = "viewer" | "operator" | "admin";
+
+export interface GuacamoleAccessPolicy {
+  minimum_role: GuacamoleAccessRole;
+  interactive_minimum_role: GuacamoleAccessRole;
+  file_transfer: {
+    upload_enabled: boolean;
+    download_enabled: boolean;
+  };
+}
+
 export interface GuacamoleConfig {
   enabled: boolean;
   configured: boolean;
@@ -47,6 +58,7 @@ export interface GuacamoleSession {
   configured: boolean;
   status: "ready" | "needs_configuration" | "auth_failed";
   read_only?: boolean;
+  access: GuacamoleAccessPolicy;
   agent_id: string;
   source: string;
   connection_id?: string;

@@ -1,4 +1,4 @@
-import type { GuacamoleDisplayProfile } from "@/hooks/useGuacamole";
+import type { GuacamoleAccessPolicy, GuacamoleDisplayProfile } from "@/hooks/useGuacamole";
 
 export type PersistedGuacamoleClientSession = {
   authToken: string;
@@ -19,6 +19,7 @@ export type WorkspaceConnection = {
   title: string;
   readOnly: boolean;
   recorded: boolean;
+  accessPolicy: GuacamoleAccessPolicy | null;
   requestedConnectionId: string | null;
   requestedVmUsername: string | null;
   status: string;
@@ -56,6 +57,7 @@ export type PersistedWorkspaceSession = {
   title: string;
   readOnly?: boolean;
   recorded?: boolean;
+  accessPolicy?: GuacamoleAccessPolicy | null;
   requestedConnectionId?: string | null;
   requestedVmUsername?: string | null;
   minimized: boolean;
