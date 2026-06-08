@@ -6,7 +6,6 @@ import time
 from contextlib import asynccontextmanager
 from http.cookies import SimpleCookie
 from pathlib import Path
-from typing import Literal
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +19,7 @@ from vm_agent_server.src.agents import AgentCommandHandler, AgentLifecycleEventH
 from vm_agent_server.src.api.routers.guacamole_router import build_guacamole_router
 from vm_agent_server.src.api.routers.settings_router import build_settings_router
 from vm_agent_server.src.api.routers.users_router import build_users_router
+from vm_agent_server.src.api.schemas.agent_registry_requests import AgentRegistryUpdateRequest
 from vm_agent_server.src.api.schemas.agent_responses import AgentTokenRotationResponse
 from vm_agent_server.src.authz import request_has_minimum_role, role_required_response, websocket_has_minimum_role
 from vm_agent_server.src.api.routers.deployment_router import build_deployment_router
@@ -72,24 +72,6 @@ guacamole_service = GuacamoleService(
     get_guacamole_base_url=get_guacamole_request_base_url,
     rdp_monitor=rdp_monitor_service,
 )
-
-
-class AgentGuacamoleFileTransferUpdateRequest(BaseModel):
-    upload_enabled: bool | None = None
-    download_enabled: bool | None = None
-
-
-class AgentGuacamoleAccessUpdateRequest(BaseModel):
-    minimum_role: Literal["viewer", "operator", "admin"] | None = None
-    interactive_minimum_role: Literal["viewer", "operator", "admin"] | None = None
-    file_transfer: AgentGuacamoleFileTransferUpdateRequest | None = None
-
-
-class AgentRegistryUpdateRequest(BaseModel):
-    hostname: str | None = None
-    display_name: str | None = None
-    guacamole_access: AgentGuacamoleAccessUpdateRequest | None = None
-
 
 def _is_benign_connection_reset(context: dict[str, object]) -> bool:
     exception = context.get("exception")
