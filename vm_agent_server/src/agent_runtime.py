@@ -192,6 +192,9 @@ class AgentRuntime:
                 current_procs = target.setdefault("processes", {})
                 for pid, proc_info in incoming_procs.items():
                     pid_str = str(pid)
+                    if isinstance(proc_info, dict) and proc_info.get("is_running") is False:
+                        current_procs.pop(pid_str, None)
+                        continue
                     if pid_str not in current_procs:
                         current_procs[pid_str] = proc_info
                     else:
