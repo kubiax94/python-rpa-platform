@@ -203,10 +203,17 @@ export function GuacamolePanel({ agentId, active = false, canOperate = false }: 
   const authSession = loadAuthSession();
   const canViewRemote = canOperate || hasMinimumRole(authSession?.user.roles, "viewer");
   const accessPolicy = data?.access ?? session?.accessPolicy ?? null;
-  const minimumRole = accessPolicy?.minimum_role ?? "operator";
-  const interactiveMinimumRole = accessPolicy?.interactive_minimum_role ?? "admin";
-  const canOpenRemote = hasMinimumRole(authSession?.user.roles, minimumRole);
-  const canUseInteractive = hasMinimumRole(authSession?.user.roles, interactiveMinimumRole);
+  const viewRule = accessPolicy?.permissions.view;
+  const interactRule = accessPolicy?.permissions.interact;
+  const uploadRule = accessPolicy?.permissions.upload;
+  const downloadRule = accessPolicy?.permissions.download;
+  const effectivePermissions = accessPolicy?.effective_permissions ?? {};
+  const minimumRole = viewRule?.minimum_role ?? "operator";
+  const interactiveMinimumRole = interactRule?.minimum_role ?? "admin";
+  const canOpenRemote = accessPolicy ? effectivePermissions.view === true : loading;
+  const canUseInteractive = accessPolicy ? effectivePermissions.interact === true : false;
+  const canRecord = accessPolicy ? effectivePermissions.recording === true : false;
+  const canKickSessions = accessPolicy ? effectivePermissions.session_kick === true : false;
   const operatorReadOnlyOnly = canOpenRemote && !canUseInteractive;
 
   useEffect(() => {
@@ -318,7 +325,7 @@ export function GuacamolePanel({ agentId, active = false, canOperate = false }: 
             </button>
             <button
               onClick={openRecordedWorkspace}
-              disabled={!selectedConnectionId || sessionLoading || !data?.recording?.enabled || !data?.recording?.configured}
+              disabled={!selectedConnectionId || sessionLoading || !data?.recording?.enabled || !data?.recording?.configured || !canRecord}
               className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-100 hover:border-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {sessionLoading ? "Preparing..." : "Start Recorded Session"}
@@ -368,8 +375,8 @@ export function GuacamolePanel({ agentId, active = false, canOperate = false }: 
               <InfoRow label="Workspace mode" value={effectiveReadOnly ? "Read-only" : "Interactive"} />
               <InfoRow label="Access threshold" value={formatRoleLabel(minimumRole)} />
               <InfoRow label="Interactive threshold" value={formatRoleLabel(interactiveMinimumRole)} />
-              <InfoRow label="File upload" value={formatTransferState(accessPolicy?.file_transfer.upload_enabled !== false)} />
-              <InfoRow label="File download" value={formatTransferState(accessPolicy?.file_transfer.download_enabled !== false)} />
+              <InfoRow label="File upload" value={formatTransferState(uploadRule?.enabled !== false)} />
+              <InfoRow label="File download" value={formatTransferState(downloadRule?.enabled !== false)} />
               <InfoRow label="Recording Profile" value={data?.recording?.enabled ? (data.recording.configured ? "Ready for on-demand use" : "Misconfigured") : "Disabled"} />
               <InfoRow label="Session Capture" value={isCurrentAgent ? (session?.recorded ? "Recorded" : "Off") : "-"} />
               <InfoRow label="Connection" value={selectedConnectionName} />
@@ -521,7 +528,7 @@ export function GuacamolePanel({ agentId, active = false, canOperate = false }: 
                           <span>Windows state: {vmSession.status || "Unknown"}</span>
                           {vmSession.identity?.auth_provider && <span>Auth profile: {vmSession.identity.auth_provider}</span>}
                         </div>
-                        {canAdmin && (vmSession.in_use_by_users?.length ?? 0) > 0 && (
+                        {canKickSessions && (vmSession.in_use_by_users?.length ?? 0) > 0 && (
                           <div className="mt-3 flex flex-wrap gap-2">
                             {vmSession.in_use_by_users?.map((owner) => {
                               const ownerLabel = owner.display_name || owner.username || owner.email || owner.subject;
