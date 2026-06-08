@@ -121,12 +121,46 @@ function mergeRegistryAgents(agents: AgentsMap, registryRows: AgentRegistryRow[]
     if (typeof connection.last_seen !== "number" && typeof row.last_seen_at === "number") {
       connection.last_seen = row.last_seen_at;
     }
+    if (!connection.source) {
+      connection.source = "registry";
+    }
 
     merged[agentId] = {
       ...current,
       ...(Object.keys(metrics).length > 0 ? { __agent_metrics: metrics } : {}),
       ...(Object.keys(connection).length > 0 ? { __agent_connection: connection } : {}),
     };
+  }
+
+  return merged;
+}
+
+function markRuntimeAgents(snapshot: AgentsMap): AgentsMap {
+  return Object.fromEntries(
+    Object.entries(snapshot).map(([agentId, state]) => {
+      const connection = state.__agent_connection ? { ...state.__agent_connection, source: "runtime" as const } : { source: "runtime" as const };
+      return [
+        agentId,
+        {
+          ...state,
+          __agent_connection: connection,
+        },
+      ];
+    })
+  );
+}
+
+function reconcileRegistryAgents(agents: AgentsMap, registryRows: AgentRegistryRow[]): AgentsMap {
+  const merged = mergeRegistryAgents(agents, registryRows);
+  const registryIds = new Set(registryRows.map((row) => String(row.id || "").trim()).filter(Boolean));
+
+  for (const [agentId, state] of Object.entries(merged)) {
+    if (registryIds.has(agentId)) {
+      continue;
+    }
+    if (state.__agent_connection?.source === "registry") {
+      delete merged[agentId];
+    }
   }
 
   return merged;
@@ -173,7 +207,7 @@ export function useAgentSocket(enabled = true) {
       const rows = await fetchJSON<AgentRegistryRow[]>(`${API_BASE}/api/agent-registry`);
       registryRowsRef.current = rows;
       startTransition(() => {
-        setAgents((current) => mergeRegistryAgents(current, rows));
+        setAgents((current) => reconcileRegistryAgents(current, rows));
       });
     } catch (error) {
       console.error("[useAgentSocket] Failed to refresh agent registry:", error);
@@ -236,7 +270,7 @@ export function useAgentSocket(enabled = true) {
 
         if (isAgentSnapshotMessage(message)) {
           startTransition(() => {
-            setAgents(mergeRegistryAgents(message.data, registryRowsRef.current));
+            setAgents(reconcileRegistryAgents(markRuntimeAgents(message.data), registryRowsRef.current));
           });
           return;
         }
@@ -272,7 +306,7 @@ export function useAgentSocket(enabled = true) {
 
         if (isLegacyAgentsMap(message)) {
           startTransition(() => {
-            setAgents(mergeRegistryAgents(message, registryRowsRef.current));
+            setAgents(reconcileRegistryAgents(markRuntimeAgents(message), registryRowsRef.current));
           });
           return;
         }
@@ -382,47 +416,6 @@ export function useAgentSocket(enabled = true) {
     };
   }, [enabled, refreshRegistryAgents]);
 
-  useEffect(() => {
-    if (!enabled) {
-      registryRowsRef.current = [];
-      return;
-    }
-
-    let cancelled = false;
-
-    const refreshRegistry = async () => {
-      const accessToken = getAccessToken();
-      if (!accessToken) {
-        return;
-      }
-
-      try {
-        const rows = await fetchJSON<AgentRegistryRow[]>(`${API_BASE}/api/agent-registry`);
-        if (cancelled) {
-          return;
-        }
-        registryRowsRef.current = rows;
-        startTransition(() => {
-          setAgents((current) => mergeRegistryAgents(current, rows));
-        });
-      } catch (error) {
-        if (!cancelled) {
-          console.error("[useAgentSocket] Failed to refresh agent registry:", error);
-        }
-      }
-    };
-
-    void refreshRegistry();
-    const intervalId = window.setInterval(() => {
-      void refreshRegistry();
-    }, 15000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [enabled]);
-
   const sendCommand = useCallback((type: string, data: Record<string, unknown>) => {
     if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
       console.error("[WS] Cannot send — not connected");
@@ -478,5 +471,5 @@ export function useAgentSocket(enabled = true) {
     sendCommand("unwatch_process_manager", { agent_id: agentId });
   }, [sendCommand]);
 
-  return { agents, connected, sendCommand, latestScreenshotEvent, requestProcessScreenshot, requestDesktopScreenshot, watchProcessManager, unwatchProcessManager };
+  return { agents, connected, sendCommand, latestScreenshotEvent, requestProcessScreenshot, requestDesktopScreenshot, watchProcessManager, unwatchProcessManager, refreshAgents: refreshRegistryAgents };
 }

@@ -230,7 +230,7 @@ type ProcessFocusTarget = {
 };
 
 function DashboardShell({ session, onLogout, socketEnabled }: { session: AuthSession; onLogout: () => Promise<void>; socketEnabled: boolean }) {
-  const { agents, connected, sendCommand, latestScreenshotEvent, requestProcessScreenshot, requestDesktopScreenshot, watchProcessManager, unwatchProcessManager } = useAgentSocket(socketEnabled);
+  const { agents, connected, sendCommand, latestScreenshotEvent, requestProcessScreenshot, requestDesktopScreenshot, watchProcessManager, unwatchProcessManager, refreshAgents } = useAgentSocket(socketEnabled);
   const agentIds = Object.keys(agents);
   const { data: taskRows } = useTasks();
   const { session: guacamoleSession } = useGuacamoleWorkspace();
@@ -315,8 +315,10 @@ function DashboardShell({ session, onLogout, socketEnabled }: { session: AuthSes
             connected={connected}
             tasks={taskRows}
             canPrepareDeployment={canOperate}
+            canManageAgents={canManageSettings}
             onSelectAgent={handleSelectAgent}
             onOpenTaskTracker={() => handleOpenTaskTracker()}
+            onAgentsChanged={refreshAgents}
           />
         )}
 
@@ -384,17 +386,17 @@ export default function Dashboard() {
   const { session, authConfig, loading, backendAvailability, authNotice, refresh, loginLocal, beginMicrosoftLogin, logout } = useUserAuth();
   const localLoginEnabled = useMemo(() => Boolean(authConfig?.local_bootstrap_available), [authConfig?.local_bootstrap_available]);
   const microsoftLoginEnabled = useMemo(() => Boolean(authConfig?.microsoft_login_available), [authConfig?.microsoft_login_available]);
-  const [dashboardReady, setDashboardReady] = useState(false);
+  const [dashboardReadySessionKey, setDashboardReadySessionKey] = useState<string>("");
+  const dashboardReady = Boolean(session && dashboardReadySessionKey === (session.access_token || session.user.subject));
 
   useEffect(() => {
     if (!session) {
-      setDashboardReady(false);
       return;
     }
 
-    setDashboardReady(false);
+    const sessionKey = session.access_token || session.user.subject;
     const timer = window.setTimeout(() => {
-      setDashboardReady(true);
+      setDashboardReadySessionKey(sessionKey);
     }, 700);
 
     return () => {

@@ -96,6 +96,7 @@ export interface AgentMeta {
 export interface AgentConnectionMeta {
   connected?: boolean;
   last_seen?: number;
+  source?: "runtime" | "registry";
 }
 
 export interface AgentState {
