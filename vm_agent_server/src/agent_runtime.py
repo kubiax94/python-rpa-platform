@@ -151,6 +151,11 @@ class AgentRuntime:
         } if preserved_metrics is not None or preserved_connection is not None else {}
         self._prev_process_states.pop(agent_id, None)
 
+    def remove_agent(self, agent_id: str) -> None:
+        self.active_agents.pop(agent_id, None)
+        self.latest_stats.pop(agent_id, None)
+        self._prev_process_states.pop(agent_id, None)
+
     def merge_heartbeat(self, payload: HeartbeatData, telemetry_db: "TelemetryDB"):
         agent_id = payload.client_id or "unknown_agent"
         agent_status = payload.agent_status or {}

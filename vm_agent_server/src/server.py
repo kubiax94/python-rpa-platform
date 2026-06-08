@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
+from pydantic import BaseModel
 import uvicorn
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
@@ -70,6 +71,11 @@ guacamole_service = GuacamoleService(
     get_guacamole_base_url=get_guacamole_request_base_url,
     rdp_monitor=rdp_monitor_service,
 )
+
+
+class AgentRegistryUpdateRequest(BaseModel):
+    hostname: str | None = None
+    display_name: str | None = None
 
 
 def _is_benign_connection_reset(context: dict[str, object]) -> bool:
@@ -555,6 +561,38 @@ async def api_agent_registry_item(agent_id: str, request: Request):
     if not item:
         return JSONResponse({"error": "Not found"}, status_code=404)
     return JSONResponse(item)
+
+
+@app.patch("/api/agent-registry/{agent_id}")
+async def api_update_agent_registry_item(agent_id: str, body: AgentRegistryUpdateRequest, request: Request):
+    if not request_has_minimum_role(request, "admin"):
+        return role_required_response("admin")
+
+    existing = await registry_db.get_agent(agent_id)
+    if not existing:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+
+    hostname = body.hostname.strip() if isinstance(body.hostname, str) else ""
+    display_name = body.display_name.strip() if isinstance(body.display_name, str) else ""
+    await registry_db.upsert_agent(agent_id, hostname=hostname, display_name=display_name)
+    updated = await registry_db.get_agent(agent_id)
+    return JSONResponse(updated or {"id": agent_id})
+
+
+@app.delete("/api/agent-registry/{agent_id}")
+async def api_delete_agent_registry_item(agent_id: str, request: Request):
+    if not request_has_minimum_role(request, "admin"):
+        return role_required_response("admin")
+
+    existing = await registry_db.get_agent(agent_id)
+    if not existing:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+
+    await agent_runtime.timeout_agent(agent_id)
+    agent_runtime.remove_agent(agent_id)
+    await registry_db.delete_agent(agent_id)
+    frontend_snapshot_event.set()
+    return JSONResponse({"deleted": True, "agent_id": agent_id})
 
 
 @app.post("/api/agent-registry/{agent_id}/rotate-token", response_model=AgentTokenRotationResponse)
