@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { API_BASE, fetchJSON, sendJSON } from "@/lib/auth";
 import type { Task } from "@/hooks/useTaskAPI";
 import { getAgentMetrics, isAgentOnline, type AgentsMap } from "@/types/agent";
 import { ActiveTaskNotifications } from "./ActiveTaskNotifications";
@@ -12,14 +13,41 @@ interface AgentListProps {
   connected: boolean;
   tasks: Task[];
   canPrepareDeployment: boolean;
+  canManageAgents: boolean;
   onSelectAgent: (agentId: string) => void;
   onOpenTaskTracker: () => void;
+  onAgentsChanged?: () => Promise<void> | void;
 }
 
-export function AgentList({ agents, connected, tasks, canPrepareDeployment, onSelectAgent, onOpenTaskTracker }: AgentListProps) {
+export function AgentList({ agents, connected, tasks, canPrepareDeployment, canManageAgents, onSelectAgent, onOpenTaskTracker, onAgentsChanged }: AgentListProps) {
   const agentIds = Object.keys(agents);
   const onlineCount = agentIds.filter((id) => isAgentOnline(agents[id])).length;
   const [deployState, setDeployState] = useState<{ agentId?: string | null; hostname?: string | null; displayName?: string | null } | null>(null);
+
+  const handleEditAgent = async (agentId: string) => {
+    const currentHostname = getAgentMetrics(agents[agentId])?.hostname || agentId;
+    const nextHostname = window.prompt("Agent hostname / FQDN", currentHostname)?.trim();
+    if (!nextHostname) {
+      return;
+    }
+
+    const nextDisplayName = window.prompt("Agent display name", currentHostname)?.trim() || nextHostname;
+    await sendJSON(`${API_BASE}/api/agent-registry/${encodeURIComponent(agentId)}`, "PATCH", {
+      hostname: nextHostname,
+      display_name: nextDisplayName,
+    });
+    await onAgentsChanged?.();
+  };
+
+  const handleDeleteAgent = async (agentId: string) => {
+    const confirmed = window.confirm(`Delete agent ${agentId}?`);
+    if (!confirmed) {
+      return;
+    }
+
+    await fetchJSON(`${API_BASE}/api/agent-registry/${encodeURIComponent(agentId)}`, { method: "DELETE" });
+    await onAgentsChanged?.();
+  };
 
   return (
     <div>
@@ -59,6 +87,8 @@ export function AgentList({ agents, connected, tasks, canPrepareDeployment, onSe
               connected={connected}
               selected={false}
               onClick={() => onSelectAgent(id)}
+              onEdit={canManageAgents ? () => { void handleEditAgent(id); } : undefined}
+              onDelete={canManageAgents ? () => { void handleDeleteAgent(id); } : undefined}
               onDeploy={canPrepareDeployment ? () => {
                 const metrics = getAgentMetrics(agents[id]);
                 setDeployState({
