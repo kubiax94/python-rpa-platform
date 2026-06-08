@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { AgentAccessPolicyPanel } from "@/components/AgentAccessPolicyPanel";
+import type { AgentTab } from "@/components/agent-tabs";
 import type { Task } from "@/hooks/useTaskAPI";
 import type { ProcessScreenshotState } from "@/hooks/useAgentSocket";
 import { getAgentConnection, getAgentSessions, getSessionProcessCount, isAgentOnline, type AgentState } from "@/types/agent";
@@ -12,10 +14,11 @@ import { GuacamoleRecordsPanel } from "@/components/GuacamoleRecordsPanel";
 import { MonitoredView } from "./MonitoredView";
 import { OverviewPanel } from "./OverviewPanel";
 
-type AgentTab = "overview" | "processes" | "monitored" | "remote" | "records" | "commands";
-
-function sanitizeAgentTab(tab: AgentTab, canOperate: boolean): AgentTab {
+function sanitizeAgentTab(tab: AgentTab, canOperate: boolean, canManageAccess: boolean): AgentTab {
   if (!canOperate && tab === "commands") {
+    return "overview";
+  }
+  if (!canManageAccess && tab === "access") {
     return "overview";
   }
   return tab;
@@ -26,6 +29,7 @@ interface AgentDetailProps {
   state: AgentState;
   tasks: Task[];
   canOperate: boolean;
+  canManageAccess: boolean;
   sendCommand: (type: string, data: Record<string, unknown>) => void;
   latestScreenshotEvent: ProcessScreenshotState | null;
   onCaptureProcessScreenshot: (agentId: string, pid: number, hwnd?: number) => { agentId: string; targetType: "process"; pid: number; hwnd?: number; requestId: string };
@@ -41,8 +45,8 @@ interface AgentDetailProps {
   } | null;
 }
 
-export function AgentDetail({ agentId, state, tasks, canOperate, sendCommand, latestScreenshotEvent, onCaptureProcessScreenshot, onCaptureDesktopScreenshot, onWatchProcessManager, onUnwatchProcessManager, onBack, onOpenTaskTracker, preferredTab, focusedProcess }: AgentDetailProps) {
-  const [activeTab, setActiveTab] = useState<AgentTab>(sanitizeAgentTab(preferredTab ?? "overview", canOperate));
+export function AgentDetail({ agentId, state, tasks, canOperate, canManageAccess, sendCommand, latestScreenshotEvent, onCaptureProcessScreenshot, onCaptureDesktopScreenshot, onWatchProcessManager, onUnwatchProcessManager, onBack, onOpenTaskTracker, preferredTab, focusedProcess }: AgentDetailProps) {
+  const [activeTab, setActiveTab] = useState<AgentTab>(sanitizeAgentTab(preferredTab ?? "overview", canOperate, canManageAccess));
 
   const sessions = getAgentSessions(state);
   const agentOnline = isAgentOnline(state);
@@ -62,7 +66,7 @@ export function AgentDetail({ agentId, state, tasks, canOperate, sendCommand, la
     ).length;
   }, 0);
 
-  const tiles: {
+  const baseTiles: {
     label: string;
     value: number | null;
     sub: string;
@@ -143,6 +147,21 @@ export function AgentDetail({ agentId, state, tasks, canOperate, sendCommand, la
       ),
     },
   ];
+  const tiles = canManageAccess ? [
+    ...baseTiles,
+    {
+      label: "Access Policy",
+      value: null,
+      sub: "acl matrix",
+      color: "cyan",
+      tab: "access" as AgentTab,
+      icon: (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 0h10.5A2.25 2.25 0 0 1 19.5 12.75v6A2.25 2.25 0 0 1 17.25 21h-9a2.25 2.25 0 0 1-2.25-2.25v-6A2.25 2.25 0 0 1 8.25 10.5Z" />
+        </svg>
+      ),
+    },
+  ] : baseTiles;
 
   const colorMap: Record<string, { bg: string; text: string; border: string }> = {
     blue: { bg: "bg-blue-500/10", text: "text-blue-400", border: "border-blue-500/30" },
@@ -190,13 +209,13 @@ export function AgentDetail({ agentId, state, tasks, canOperate, sendCommand, la
           return (
             <button
               key={tile.tab}
-              onClick={() => setActiveTab(sanitizeAgentTab(tile.tab, canOperate))}
-              disabled={(!agentOnline && tile.tab === "commands") || (!canOperate && tile.tab === "commands")}
+              onClick={() => setActiveTab(sanitizeAgentTab(tile.tab, canOperate, canManageAccess))}
+              disabled={(!agentOnline && tile.tab === "commands") || (!canOperate && tile.tab === "commands") || (!canManageAccess && tile.tab === "access")}
               className={`p-4 rounded-lg border transition-all text-left ${
                 isActive
                   ? `${c.bg} ${c.border}`
                   : "border-slate-700 bg-slate-800/30 hover:border-slate-600"
-              } ${((!agentOnline && tile.tab === "commands") || (!canOperate && tile.tab === "commands")) ? "opacity-50 cursor-not-allowed hover:border-slate-700" : ""}`}
+              } ${((!agentOnline && tile.tab === "commands") || (!canOperate && tile.tab === "commands") || (!canManageAccess && tile.tab === "access")) ? "opacity-50 cursor-not-allowed hover:border-slate-700" : ""}`}
             >
               <div className="flex items-center gap-2 mb-2">
                 <span className={isActive ? c.text : "text-slate-500"}>{tile.icon}</span>
@@ -252,6 +271,8 @@ export function AgentDetail({ agentId, state, tasks, canOperate, sendCommand, la
       <GuacamolePanel agentId={agentId} active={activeTab === "remote"} canOperate={canOperate} />
 
       <GuacamoleRecordsPanel agentId={agentId} active={activeTab === "records"} />
+
+      <AgentAccessPolicyPanel agentId={agentId} active={activeTab === "access"} canManageAccess={canManageAccess} />
     </div>
   );
 }
