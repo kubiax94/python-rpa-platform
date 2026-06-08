@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.5.0...v0.6.0) (2026-06-08)
+
+
+### Features
+
+* **frontend:** agend edit and delete option ([24e0c61](https://github.com/kubiax94/python-rpa-platform/commit/24e0c61aa9d9527779404c03b2415503b573a707))
+* **frontend:** agent  extended connection status ([4ddb63f](https://github.com/kubiax94/python-rpa-platform/commit/4ddb63f3b9952c03bb7ae322deda490d5298c0ee))
+* **server:** agent removal added and edit ([f337833](https://github.com/kubiax94/python-rpa-platform/commit/f33783399e8642adceb0f4a5b9c4d8b3bc707651))
+
 ## [0.5.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.4.3...v0.5.0) (2026-06-08)
 
 
