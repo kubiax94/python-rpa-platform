@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.6.0...v0.7.0) (2026-06-08)
+
+
+### Features
+
+* **frontend:** added file trfansfer ([96e7e43](https://github.com/kubiax94/python-rpa-platform/commit/96e7e434ff32a2e510cb78aa97ce378e15027c3a))
+
 ## [0.6.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.5.0...v0.6.0) (2026-06-08)
 
 
