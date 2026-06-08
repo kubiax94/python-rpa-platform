@@ -72,6 +72,7 @@ export function GuacamoleViewport({
   const keyboardCaptureEnabledRef = useRef(false);
   const keyboardRef = useRef<InstanceType<typeof Guacamole.Keyboard> | null>(null);
   const clientRef = useRef<InstanceType<typeof Guacamole.Client> | null>(null);
+  const clipboardCleanupRef = useRef<(() => void) | null>(null);
   const tunnelRef = useRef<InstanceType<typeof Guacamole.HTTPTunnel> | InstanceType<typeof Guacamole.WebSocketTunnel> | InstanceType<typeof Guacamole.ChainedTunnel> | null>(null);
   const exportingDisplayStateRef = useRef(false);
   const [reconnectRequestId, setReconnectRequestId] = useState(0);
@@ -327,6 +328,8 @@ export function GuacamoleViewport({
     const shouldDisconnectTransport = options?.disconnectTransport ?? true;
     resizeObserverRef.current?.disconnect();
     resizeObserverRef.current = null;
+    clipboardCleanupRef.current?.();
+    clipboardCleanupRef.current = null;
 
     if (clientRef.current && shouldDisconnectTransport) {
       clientRef.current.disconnect();
@@ -1016,6 +1019,61 @@ export function GuacamoleViewport({
         connected: false,
         error: "The remote desktop server requested additional credentials.",
       });
+    };
+
+    client.onclipboard = (stream, mimetype) => {
+      if (!isCurrentConnection() || mimetype !== "text/plain") {
+        return;
+      }
+
+      let clipboardText = "";
+      const reader = new Guacamole.StringReader(stream);
+      reader.ontext = (chunk) => {
+        clipboardText += chunk;
+      };
+      reader.onend = () => {
+        if (!isCurrentConnection() || !clipboardText || !navigator.clipboard?.writeText) {
+          return;
+        }
+
+        void navigator.clipboard.writeText(clipboardText).catch((error) => {
+          debugLog("clipboard-write-failed", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      };
+    };
+
+    const handlePaste = (event: ClipboardEvent) => {
+      if (!isCurrentConnection() || !activeRef.current || session.readOnly) {
+        return;
+      }
+
+      if (document.activeElement !== displayElement) {
+        return;
+      }
+
+      const clipboardText = event.clipboardData?.getData("text/plain") || "";
+      if (!clipboardText) {
+        return;
+      }
+
+      try {
+        const stream = client.createClipboardStream("text/plain");
+        const writer = new Guacamole.StringWriter(stream);
+        writer.sendText(clipboardText);
+        writer.sendEnd();
+        event.preventDefault();
+      } catch (error) {
+        debugLog("clipboard-paste-failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+
+    document.addEventListener("paste", handlePaste);
+    clipboardCleanupRef.current = () => {
+      document.removeEventListener("paste", handlePaste);
     };
 
     tunnel.onstatechange = (state) => {

@@ -3,7 +3,15 @@
 import { startTransition, useEffect, useRef, useState, useCallback } from "react";
 import type { AgentsMap, CommandPayload } from "@/types/agent";
 import { BACKEND_DISCONNECTED_EVENT } from "@/components/guacamole/utils";
-import { API_BASE, AUTH_SESSION_INVALID_EVENT, buildFrontendWebSocketUrl, getAccessToken, withAuthHeaders } from "@/lib/auth";
+import { API_BASE, AUTH_SESSION_INVALID_EVENT, buildFrontendWebSocketUrl, fetchJSON, getAccessToken, withAuthHeaders } from "@/lib/auth";
+
+type AgentRegistryRow = {
+  id: string;
+  hostname?: string | null;
+  display_name?: string | null;
+  connection_status?: string | null;
+  last_seen_at?: number | null;
+};
 
 export type ScreenshotTargetType = "process" | "desktop";
 
@@ -86,6 +94,44 @@ function stripDynamicAgentState(agents: AgentsMap): AgentsMap {
   );
 }
 
+function mergeRegistryAgents(agents: AgentsMap, registryRows: AgentRegistryRow[]): AgentsMap {
+  if (registryRows.length === 0) {
+    return agents;
+  }
+
+  const merged: AgentsMap = { ...agents };
+
+  for (const row of registryRows) {
+    const agentId = String(row.id || "").trim();
+    if (!agentId) {
+      continue;
+    }
+
+    const current = merged[agentId] || {};
+    const hostname = String(row.hostname || row.display_name || "").trim();
+    const metrics = current.__agent_metrics ? { ...current.__agent_metrics } : {};
+    const connection = current.__agent_connection ? { ...current.__agent_connection } : {};
+
+    if (!metrics.hostname && hostname) {
+      metrics.hostname = hostname;
+    }
+    if (typeof connection.connected !== "boolean") {
+      connection.connected = row.connection_status === "online";
+    }
+    if (typeof connection.last_seen !== "number" && typeof row.last_seen_at === "number") {
+      connection.last_seen = row.last_seen_at;
+    }
+
+    merged[agentId] = {
+      ...current,
+      ...(Object.keys(metrics).length > 0 ? { __agent_metrics: metrics } : {}),
+      ...(Object.keys(connection).length > 0 ? { __agent_connection: connection } : {}),
+    };
+  }
+
+  return merged;
+}
+
 async function classifyFrontendSocketClose(accessToken: string): Promise<"auth-invalid" | "backend-online" | "backend-offline"> {
   if (!accessToken) {
     return "auth-invalid";
@@ -115,6 +161,24 @@ export function useAgentSocket(enabled = true) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialConnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualClose = useRef(false);
+  const registryRowsRef = useRef<AgentRegistryRow[]>([]);
+
+  const refreshRegistryAgents = useCallback(async () => {
+    if (!enabled || !getAccessToken()) {
+      registryRowsRef.current = [];
+      return;
+    }
+
+    try {
+      const rows = await fetchJSON<AgentRegistryRow[]>(`${API_BASE}/api/agent-registry`);
+      registryRowsRef.current = rows;
+      startTransition(() => {
+        setAgents((current) => mergeRegistryAgents(current, rows));
+      });
+    } catch (error) {
+      console.error("[useAgentSocket] Failed to refresh agent registry:", error);
+    }
+  }, [enabled]);
 
   const closeSocket = useCallback(() => {
     const currentSocket = ws.current;
@@ -166,12 +230,13 @@ export function useAgentSocket(enabled = true) {
 
         if (isAuthOkMessage(message)) {
           setConnected(true);
+          void refreshRegistryAgents();
           return;
         }
 
         if (isAgentSnapshotMessage(message)) {
           startTransition(() => {
-            setAgents(message.data);
+            setAgents(mergeRegistryAgents(message.data, registryRowsRef.current));
           });
           return;
         }
@@ -207,7 +272,7 @@ export function useAgentSocket(enabled = true) {
 
         if (isLegacyAgentsMap(message)) {
           startTransition(() => {
-            setAgents(message);
+            setAgents(mergeRegistryAgents(message, registryRowsRef.current));
           });
           return;
         }
@@ -264,7 +329,7 @@ export function useAgentSocket(enabled = true) {
     };
 
     ws.current = socket;
-  }, [enabled]);
+  }, [enabled, refreshRegistryAgents]);
 
   useEffect(() => {
     if (!enabled) {
@@ -300,6 +365,63 @@ export function useAgentSocket(enabled = true) {
       closeSocket();
     };
   }, [closeSocket, connect, enabled]);
+
+  useEffect(() => {
+    if (!enabled) {
+      registryRowsRef.current = [];
+      return;
+    }
+
+    void refreshRegistryAgents();
+    const intervalId = window.setInterval(() => {
+      void refreshRegistryAgents();
+    }, 15000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [enabled, refreshRegistryAgents]);
+
+  useEffect(() => {
+    if (!enabled) {
+      registryRowsRef.current = [];
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshRegistry = async () => {
+      const accessToken = getAccessToken();
+      if (!accessToken) {
+        return;
+      }
+
+      try {
+        const rows = await fetchJSON<AgentRegistryRow[]>(`${API_BASE}/api/agent-registry`);
+        if (cancelled) {
+          return;
+        }
+        registryRowsRef.current = rows;
+        startTransition(() => {
+          setAgents((current) => mergeRegistryAgents(current, rows));
+        });
+      } catch (error) {
+        if (!cancelled) {
+          console.error("[useAgentSocket] Failed to refresh agent registry:", error);
+        }
+      }
+    };
+
+    void refreshRegistry();
+    const intervalId = window.setInterval(() => {
+      void refreshRegistry();
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [enabled]);
 
   const sendCommand = useCallback((type: string, data: Record<string, unknown>) => {
     if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {

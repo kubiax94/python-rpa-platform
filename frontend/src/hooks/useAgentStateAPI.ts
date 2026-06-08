@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { AgentState } from "@/types/agent";
-import { API_BASE, fetchJSON } from "@/lib/auth";
+import { API_BASE, ApiError, fetchJSON } from "@/lib/auth";
 
 export function useAgentState(agentId: string | null) {
   const [data, setData] = useState<AgentState | null>(null);
@@ -19,7 +19,9 @@ export function useAgentState(agentId: string | null) {
       const state = await fetchJSON<AgentState>(`${API_BASE}/api/agents/${encodeURIComponent(agentId)}`);
       setData(state);
     } catch (e) {
-      console.error("[useAgentState] Error:", e);
+      if (!(e instanceof ApiError && e.status === 404)) {
+        console.error("[useAgentState] Error:", e);
+      }
       setData(null);
     } finally {
       setLoading(false);

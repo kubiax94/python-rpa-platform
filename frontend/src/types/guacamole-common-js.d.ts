@@ -38,15 +38,22 @@ declare module "guacamole-common-js" {
     sendEnd(): void;
   }
 
+  interface GuacamoleStringReader {
+    ontext?: ((text: string) => void) | null;
+    onend?: (() => void) | null;
+  }
+
   interface GuacamoleClient {
     onstatechange?: ((state: number) => void) | null;
     onerror?: ((status: GuacamoleStatus) => void) | null;
     onrequired?: ((parameters: string[]) => void) | null;
     onargv?: ((stream: GuacamoleInputStream, mimetype: string, name: string) => void) | null;
+    onclipboard?: ((stream: GuacamoleInputStream, mimetype: string) => void) | null;
     connect(data?: string): void;
     disconnect(): void;
     getDisplay(): GuacamoleDisplay;
     createArgumentValueStream(mimetype: string, name: string): GuacamoleOutputStream;
+    createClipboardStream(mimetype: string): GuacamoleOutputStream;
     sendMouseState(state: unknown, applyDisplayScale?: boolean): void;
     sendKeyEvent(pressed: number, keysym: number): void;
     sendSize(width: number, height: number, dpi?: number): void;
@@ -101,6 +108,7 @@ declare module "guacamole-common-js" {
     Mouse: GuacamoleMouseConstructor;
     Keyboard: new (target: Document | HTMLElement) => GuacamoleKeyboard;
     StringWriter: new (stream: GuacamoleOutputStream) => GuacamoleStringWriter;
+    StringReader: new (stream: GuacamoleInputStream) => GuacamoleStringReader;
     SessionRecording: new (recordingBlob: Blob | GuacamoleTunnel) => {
       onload?: (() => void) | null;
       onerror?: ((message: string) => void) | null;
