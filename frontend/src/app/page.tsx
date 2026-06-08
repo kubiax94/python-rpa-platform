@@ -7,6 +7,7 @@ import { useAgentSocket } from "@/hooks/useAgentSocket";
 import { useAgentState } from "@/hooks/useAgentStateAPI";
 import { useTasks } from "@/hooks/useTaskAPI";
 import { Sidebar, type MenuPage } from "@/components/Sidebar";
+import type { AgentTab } from "@/components/agent-tabs";
 import { AgentList } from "@/components/AgentList";
 import { AgentDetail } from "@/components/AgentDetail";
 import { DeploymentsPage } from "@/components/DeploymentsPage";
@@ -246,19 +247,22 @@ function DashboardShell({ session, onLogout, socketEnabled }: { session: AuthSes
 
   const [activePage, setActivePage] = useState<MenuPage>("agents");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [preferredAgentTab, setPreferredAgentTab] = useState<AgentTab | undefined>(undefined);
   const [processFocus, setProcessFocus] = useState<ProcessFocusTarget | null>(null);
   const [tasksEntryMode, setTasksEntryMode] = useState<"all" | "active">("all");
   const [taskAgentFilter, setTaskAgentFilter] = useState<string | null>(null);
   const { data: selectedAgentState, loading: selectedAgentLoading } = useAgentState(selectedAgent);
   const activeTaskCount = taskRows.filter((task) => task.status === "running" || task.status === "queued").length;
 
-  const handleSelectAgent = (agentId: string) => {
+  const handleSelectAgent = (agentId: string, preferredTab?: AgentTab) => {
     setSelectedAgent(agentId);
+    setPreferredAgentTab(preferredTab);
     setProcessFocus(null);
   };
 
   const handleBack = () => {
     setSelectedAgent(null);
+    setPreferredAgentTab(undefined);
     setProcessFocus(null);
   };
 
@@ -271,6 +275,7 @@ function DashboardShell({ session, onLogout, socketEnabled }: { session: AuthSes
     setTaskAgentFilter(null);
     if (page !== "agents") {
       setSelectedAgent(null);
+      setPreferredAgentTab(undefined);
       setProcessFocus(null);
     }
   };
@@ -278,6 +283,7 @@ function DashboardShell({ session, onLogout, socketEnabled }: { session: AuthSes
   const handleOpenTaskTracker = (agentId?: string | null) => {
     setActivePage("tasks");
     setSelectedAgent(null);
+    setPreferredAgentTab(undefined);
     setProcessFocus(null);
     setTasksEntryMode("active");
     setTaskAgentFilter(agentId ?? null);
@@ -286,6 +292,7 @@ function DashboardShell({ session, onLogout, socketEnabled }: { session: AuthSes
   const handleOpenTaskProcess = (agentId: string, pid?: number | null, taskId?: string | null) => {
     setActivePage("agents");
     setSelectedAgent(agentId);
+    setPreferredAgentTab("processes");
     setProcessFocus({ pid: pid ?? null, taskId: taskId ?? null });
   };
 
@@ -324,11 +331,12 @@ function DashboardShell({ session, onLogout, socketEnabled }: { session: AuthSes
 
         {activePage === "agents" && selectedAgent && agents[selectedAgent] && (
           <AgentDetail
-            key={`${selectedAgent}:${processFocus?.taskId ?? ""}:${processFocus?.pid ?? ""}`}
+            key={`${selectedAgent}:${preferredAgentTab ?? "overview"}:${processFocus?.taskId ?? ""}:${processFocus?.pid ?? ""}`}
             agentId={selectedAgent}
             state={selectedAgentState ?? agents[selectedAgent]}
             tasks={taskRows.filter((task) => task.agent_id === selectedAgent)}
             canOperate={canOperate}
+            canManageAccess={canManageSettings}
             sendCommand={sendCommand}
             latestScreenshotEvent={latestScreenshotEvent}
             onCaptureProcessScreenshot={requestProcessScreenshot}
@@ -337,7 +345,7 @@ function DashboardShell({ session, onLogout, socketEnabled }: { session: AuthSes
             onUnwatchProcessManager={unwatchProcessManager}
             onBack={handleBack}
             onOpenTaskTracker={() => handleOpenTaskTracker(selectedAgent)}
-            preferredTab={processFocus ? "processes" : undefined}
+            preferredTab={processFocus ? "processes" : preferredAgentTab}
             focusedProcess={processFocus}
           />
         )}
