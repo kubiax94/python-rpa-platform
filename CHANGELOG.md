@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.4.3...v0.5.0) (2026-06-08)
+
+
+### Features
+
+* **frontend:** added guacamole clipboard ([b09371c](https://github.com/kubiax94/python-rpa-platform/commit/b09371cc6bdcb19969f419e1819b1080eb32a1db))
+
+
+### Bug Fixes
+
+* **server:** server is no longer providing new process to server ([1d4b014](https://github.com/kubiax94/python-rpa-platform/commit/1d4b014a8ce79c8462df1b19be63990d511c6845))
+
 ## [0.4.3](https://github.com/kubiax94/python-rpa-platform/compare/v0.4.2...v0.4.3) (2026-06-06)
 
 
