@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.7.0...v0.8.0) (2026-06-08)
+
+
+### Features
+
+* **frontend:** added RBAC for gucamole bridge ([3188c7d](https://github.com/kubiax94/python-rpa-platform/commit/3188c7dc8d4b4a2899079ae46c2d828013a087f1))
+* **server:** added RBAC for gucamole bridge ([085bb5b](https://github.com/kubiax94/python-rpa-platform/commit/085bb5bb227239ead21783e52d6fc0efb22b02b9))
+
 ## [0.7.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.6.0...v0.7.0) (2026-06-08)
 
 
