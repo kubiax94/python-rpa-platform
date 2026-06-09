@@ -101,12 +101,16 @@ class AgentRuntime:
                     continue
 
                 processes = session_data.get("processes", {})
+                reported_process_count = session_data.get("process_count")
                 session_summary = {
                     key: copy.deepcopy(value)
                     for key, value in session_data.items()
                     if key != "processes"
                 }
-                session_summary["process_count"] = len(processes) if isinstance(processes, dict) else 0
+                if isinstance(reported_process_count, int) and reported_process_count >= 0:
+                    session_summary["process_count"] = reported_process_count
+                else:
+                    session_summary["process_count"] = len(processes) if isinstance(processes, dict) else 0
                 session_summary["processes"] = {}
                 summary[session_key] = session_summary
 
