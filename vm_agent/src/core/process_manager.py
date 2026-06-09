@@ -27,6 +27,7 @@ class ProcessManager(ILifeCycle, IProcessManager):
     def __init__(self, telemetry_provider: ITelemetryProvider = None):
         # PID → process info
         self._procs: Dict[int, AbstractProcess] = {}
+        self._last_reported_pids: set[int] = set()
         self.telemetry: ITelemetryProvider = telemetry_provider
 
     def _create_process(self, process: AbstractProcess) -> AbstractProcess:
@@ -131,10 +132,21 @@ class ProcessManager(ILifeCycle, IProcessManager):
             Dict of PID → process info
         """
         status = {}
+        current_pids = set(self._procs.keys())
         for [pid, proces] in self._procs.items():
             data = proces.to_json_only_change(sync=sync)
             if data:
                 status[pid] = data
+
+        if not sync:
+            removed_pids = self._last_reported_pids - current_pids
+            for pid in removed_pids:
+                status[pid] = {
+                    "pid": pid,
+                    "is_running": False,
+                }
+
+        self._last_reported_pids = current_pids
             
         return status
 
