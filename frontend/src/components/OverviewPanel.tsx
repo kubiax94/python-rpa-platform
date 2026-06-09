@@ -271,7 +271,7 @@ export function OverviewPanel({ agentId, state }: OverviewPanelProps) {
         displayName: resolveSessionLabel(sessionKey, session),
         username: session.username && session.username !== "unknown" ? session.username : null,
         status: session.status,
-        procCount: Object.keys(session.processes || {}).length,
+        procCount: typeof session.process_count === "number" ? session.process_count : Object.keys(session.processes || {}).length,
         cpuTotal: sessionCpu,
         memWs: sessionMemWs,
         memPb: sessionMemPb,
