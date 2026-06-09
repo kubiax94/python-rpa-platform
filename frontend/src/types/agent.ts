@@ -137,6 +137,10 @@ export function isAgentOnline(state: AgentState): boolean {
 }
 
 export function getSessionProcessCount(session: SessionReplica): number {
+  if (typeof session.process_count === "number" && session.process_count >= 0) {
+    return session.process_count;
+  }
+
   const processEntries = Object.keys(session.processes || {});
   if (processEntries.length > 0) {
     return processEntries.length;
