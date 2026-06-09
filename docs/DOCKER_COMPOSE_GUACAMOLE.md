@@ -135,14 +135,19 @@ docker compose up --build -d
 
 ## Persistence
 
-Runtime state is stored in workspace-local bind mounts under `docker-data/`:
+Backend runtime state stays in the workspace-local bind mount under `docker-data/`:
 
 - `docker-data/backend/` -> backend SQLite files and task logs
-- `docker-data/guacamole/db/` -> Guacamole PostgreSQL data
-- `docker-data/guacamole/recordings/` -> Guacamole recordings
-- `docker-data/guacamole/drive/` -> Guacamole drive mount
+
+Guacamole runtime state uses Docker named volumes instead of workspace bind mounts:
+
+- `guac_db` -> Guacamole PostgreSQL data
+- `guac_recordings` -> Guacamole recordings
+- `guac_drive` -> Guacamole drive mount
 
 Deployment artifacts remain mounted to `artifacts/` so files created by the backend stay visible in the repo.
+
+This avoids host UID/GID and filesystem ACL mismatches when the Guacamole containers run as their internal service users, which is a common source of `Permission denied` errors with bind mounts on client machines.
 
 ## Notes
 
