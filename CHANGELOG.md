@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.10.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.9.0...v0.10.0) (2026-06-09)
+
+
+### Features
+
+* **docker:** switch Guacamole data storage to named volumes for better persistence ([cf34aa4](https://github.com/kubiax94/python-rpa-platform/commit/cf34aa4c0e1f03b690ba89aacc83f615309303ab))
+
+
+### Bug Fixes
+
+* **agent-runtime:** prioritize reported process_count in session summary ([76675ee](https://github.com/kubiax94/python-rpa-platform/commit/76675ee2c19223617ad8546f040156ae217892e3))
+* **agent:** prioritize process_count in getSessionProcessCount if available ([86a25a2](https://github.com/kubiax94/python-rpa-platform/commit/86a25a297154a52e4c04a53288a1764300c985f9))
+* **command-panel:** ensure processCount uses process_count if available ([11b033f](https://github.com/kubiax94/python-rpa-platform/commit/11b033fe6a4e6475c68aaf6323978bba776efeb4))
+* **overview-panel:** update procCount to prioritize process_count if available ([24decfb](https://github.com/kubiax94/python-rpa-platform/commit/24decfb24057ee06a21784e9457b4f7968eeadab))
+* **process-manager:** track last reported PIDs to handle process status updates ([6973bb4](https://github.com/kubiax94/python-rpa-platform/commit/6973bb4e8df8a34775aaeec6242a41826828d72e))
+
 ## [0.9.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.8.0...v0.9.0) (2026-06-08)
 
 
