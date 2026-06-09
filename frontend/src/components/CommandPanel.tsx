@@ -63,7 +63,7 @@ export function CommandPanel({ agentId, state, canOperate, sendCommand }: Comman
       sessionId: sessionData.session_id,
       status: sessionData.status,
       username: sessionData.username,
-      processCount: Object.keys(sessionData.processes || {}).length,
+      processCount: typeof sessionData.process_count === "number" ? sessionData.process_count : Object.keys(sessionData.processes || {}).length,
     })),
     [state]
   );
