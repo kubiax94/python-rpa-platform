@@ -97,7 +97,8 @@ export function ProcessTable({ processes, highlightedPid, highlightedTaskId, onC
         </thead>
         <tbody>
           {entries.map(([pid, proc]) => {
-            const isMonitored = proc.is_monitored || proc.args?.includes("--agent_id_1234");
+            const commandLine = proc.cmd || proc.args || "";
+            const isMonitored = proc.is_monitored || commandLine.includes("--agent_id_1234");
             const status = resolveStatus(proc);
             const memory = proc.memory_usage?.working_set_size;
             const isHighlighted =
@@ -130,6 +131,11 @@ export function ProcessTable({ processes, highlightedPid, highlightedTaskId, onC
                         </span>
                       )}
                     </div>
+                    {commandLine && (
+                      <p className="mt-0.5 truncate text-[11px] font-mono text-slate-500" title={commandLine}>
+                        {commandLine}
+                      </p>
+                    )}
                     {windowHint && (
                       <p className={`mt-0.5 text-[11px] ${windowHint.cls}`} title={windowHint.text}>
                         {windowHint.text}
