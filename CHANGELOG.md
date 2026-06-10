@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.11.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.10.0...v0.11.0) (2026-06-10)
+
+
+### Features
+
+* **access:** implement identity access decision logic and evaluation functions ([16e71e6](https://github.com/kubiax94/python-rpa-platform/commit/16e71e6da183af5068de8c840bd15500e7bb38b8))
+* **access:** implement identity access decision logic and evaluation functions ([ff13f97](https://github.com/kubiax94/python-rpa-platform/commit/ff13f97f2870edbb4410849658c15bce493730c3))
+* **auth:** add agent visibility property to AuthUser interface ([e9a2241](https://github.com/kubiax94/python-rpa-platform/commit/e9a224112c8aa539151f517599d3ee48da8bbe14))
+* **authz:** add agent visibility checks for user, request, and websocket ([9a5e828](https://github.com/kubiax94/python-rpa-platform/commit/9a5e828a46be8ebea9ebd4c989f52e9a37d24dc7))
+* **authz:** add agent visibility checks to Guacamole API endpoints ([de4b6db](https://github.com/kubiax94/python-rpa-platform/commit/de4b6dbc610b7fdc83d781079eb671429fed8a42))
+* **authz:** add agent visibility checks to task API endpoints ([219e07a](https://github.com/kubiax94/python-rpa-platform/commit/219e07af575168186e31a60ad1f88e9b967d5e84))
+* **dashboard:** add visibility notice for users with restricted agent access ([1b33e50](https://github.com/kubiax94/python-rpa-platform/commit/1b33e50397b536d0655ef9edff1d12534ac9730c))
+* **router:** implement agent runtime API with metrics, events, and registry management ([2ccce4a](https://github.com/kubiax94/python-rpa-platform/commit/2ccce4a6148f5935f859acef0b6a043133d8b53f))
+* **server-settings:** add access configuration and recent user retrieval functionality ([66bddfe](https://github.com/kubiax94/python-rpa-platform/commit/66bddfe6df07e8b564ebee53aaeb92affdc6b7e5))
+* **server:** integrate recent users database and enhance user visibility checks in WebSocket broadcasts ([19d883f](https://github.com/kubiax94/python-rpa-platform/commit/19d883f07270b1b2c4cb557a9c1641d4fc82658e))
+* **session:** enhance agents snapshot visibility based on user permissions ([aa39410](https://github.com/kubiax94/python-rpa-platform/commit/aa3941086fc0e916b934f62d817af09395829723))
+* **settings-page:** implement access mode configuration and recent user retrieval ([db4e32d](https://github.com/kubiax94/python-rpa-platform/commit/db4e32dfefc77687701dc45ea70a8be2a69f7c62))
+* **settings:** add IdentityAccessSettings and IdentityAccessSettingsPatch models ([6a386d1](https://github.com/kubiax94/python-rpa-platform/commit/6a386d110e87b4e0a2a7a13818a961aa5d1f6422))
+* **settings:** add IdentityAccessSettingsPatch to server settings update ([a503ace](https://github.com/kubiax94/python-rpa-platform/commit/a503acea24c0016102bde41e75020ff85e5a9263))
+* **settings:** add IdentityAccessSettingsPatchRequest to manage access settings ([699c99a](https://github.com/kubiax94/python-rpa-platform/commit/699c99a1df0fbeec540442a9168fe0318135b386))
+* **settings:** add IdentityAccessSettingsResponse to manage access settings ([af7e36e](https://github.com/kubiax94/python-rpa-platform/commit/af7e36e18edccca5b4b974229ecbaf11a8237c25))
+* **users:** add recent users endpoint with admin role check ([cdb30f6](https://github.com/kubiax94/python-rpa-platform/commit/cdb30f65440e4532541e870c5c669a90508fbcf0))
+* **users:** add RecentUserIdentity model with last_seen_at field ([888eff6](https://github.com/kubiax94/python-rpa-platform/commit/888eff64c58c8b14ee3f4b20318cd173383d4c98))
+* **users:** enhance RecentUserIdentityResponse and add RecentUsersResponse schema ([6145b47](https://github.com/kubiax94/python-rpa-platform/commit/6145b4718b14270a1c58a24bebd151230285b7e9))
+* **users:** enhance UserService with recent user tracking and access control improvements ([d713b6c](https://github.com/kubiax94/python-rpa-platform/commit/d713b6cee92992a9741c5abe4cd7ffff72f897bb))
+* **users:** implement RecentUsersDB for managing recent user identities ([9ada935](https://github.com/kubiax94/python-rpa-platform/commit/9ada9350fe4516cee76cfd07a3b7076cc13148b5))
+
+
+### Bug Fixes
+
+* **agent-detail:** update monitored process count logic to include command checks ([392d79b](https://github.com/kubiax94/python-rpa-platform/commit/392d79b9ad21be248ef35c6492d0bda136b63c2b))
+* **monitored-view:** enhance command line retrieval for monitored processes ([4461618](https://github.com/kubiax94/python-rpa-platform/commit/44616187b2e4345e3136bc5344a3605c14380f4b))
+* **process-table:** improve monitored process detection and display command line ([d0b546a](https://github.com/kubiax94/python-rpa-platform/commit/d0b546a092220cbd5652ff69398d78af94cd9af3))
+* **process-tree:** update monitored process detection to include command line arguments ([544946c](https://github.com/kubiax94/python-rpa-platform/commit/544946c503ac873cdb9c580e39a1985d0e83b7e6))
+
 ## [0.10.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.9.0...v0.10.0) (2026-06-09)
 
 
