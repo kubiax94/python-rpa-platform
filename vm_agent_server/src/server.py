@@ -16,12 +16,11 @@ from websockets.asyncio.client import connect as websocket_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from vm_agent_server.src.agents import AgentCommandHandler, AgentLifecycleEventHandler
+from vm_agent_server.src.api.routers.agent_runtime_router import build_agent_runtime_router
 from vm_agent_server.src.api.routers.guacamole_router import build_guacamole_router
 from vm_agent_server.src.api.routers.settings_router import build_settings_router
 from vm_agent_server.src.api.routers.users_router import build_users_router
-from vm_agent_server.src.api.schemas.agent_registry_requests import AgentRegistryUpdateRequest
-from vm_agent_server.src.api.schemas.agent_responses import AgentTokenRotationResponse
-from vm_agent_server.src.authz import request_has_minimum_role, role_required_response, websocket_has_minimum_role
+from vm_agent_server.src.authz import request_has_minimum_role, role_required_response, user_has_agent_visibility, websocket_has_minimum_role
 from vm_agent_server.src.api.routers.deployment_router import build_deployment_router
 from vm_agent_server.src.api.routers.task_router import build_task_router
 from vm_agent_server.src.persistence.agent_registry_db import AgentRegistryDB
@@ -36,6 +35,7 @@ from vm_agent_server.src.settings.db import ServerSettingsDB
 from vm_agent_server.src.settings.service import ServerSettingsService
 from vm_agent_server.src.services import DeploymentService, GuacamoleService, RdpMonitorService, TaskService, UserService
 from vm_agent_server.src.persistence.telemetry_db import TelemetryDB
+from vm_agent_server.src.users.recent_users_db import RecentUsersDB
 from vm_agent_server.src.tasks.db import TaskDB
 from vm_agent_server.src.tasks.dispatcher import TaskDispatcher, build_agent_task_handler, build_deployment_task_handler
 from vm_agent_server.src.tasks.network_handler import TaskNetworkHandler
@@ -44,9 +44,10 @@ telemetry_db = TelemetryDB()
 task_db = TaskDB()
 registry_db = AgentRegistryDB()
 server_settings_db = ServerSettingsDB()
+recent_users_db = RecentUsersDB()
 server_settings_service = ServerSettingsService(server_settings_db)
 set_guacamole_settings_provider(server_settings_service.get_snapshot)
-user_service = UserService()
+user_service = UserService(recent_users_db=recent_users_db)
 agent_runtime = AgentRuntime()
 frontend_snapshot_event = asyncio.Event()
 frontend_snapshot_broadcast_task: asyncio.Task | None = None
@@ -200,6 +201,7 @@ async def lifespan(app):
     await task_db.start()
     await registry_db.start()
     await server_settings_db.start()
+    await recent_users_db.start()
     await server_settings_service.initialize()
     await deployment_service.recover_interrupted_deployments()
     frontend_snapshot_broadcast_task = asyncio.create_task(_frontend_snapshot_broadcaster())
@@ -230,6 +232,7 @@ async def lifespan(app):
     await telemetry_db.stop()
     await registry_db.stop()
     await server_settings_db.stop()
+    await recent_users_db.stop()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -407,7 +410,9 @@ async def frontend_ws(ws: WebSocket):
 async def broadcast_to_frontends(data):
     for ws in list(frontend_clients):
         try:
-            await ws.send_json({"kind": "agents_snapshot", "data": data})
+            session = getattr(ws.state, "user_session", None)
+            filtered = data if user_has_agent_visibility(getattr(session, "user", None)) else {}
+            await ws.send_json({"kind": "agents_snapshot", "data": filtered})
         except Exception:
             frontend_clients.discard(ws)
 
@@ -421,6 +426,9 @@ async def broadcast_task_event(task_id: str, payload: dict):
     """Send task output/status to all frontend clients."""
     for ws in list(frontend_clients):
         try:
+            session = getattr(ws.state, "user_session", None)
+            if not user_has_agent_visibility(getattr(session, "user", None)):
+                continue
             await ws.send_json({"kind": "task_event", "data": payload})
         except Exception:
             frontend_clients.discard(ws)
@@ -429,6 +437,9 @@ async def broadcast_task_event(task_id: str, payload: dict):
 async def broadcast_process_screenshot(payload: dict):
     for ws in list(frontend_clients):
         try:
+            session = getattr(ws.state, "user_session", None)
+            if not user_has_agent_visibility(getattr(session, "user", None)):
+                continue
             await ws.send_json({"kind": "process_screenshot", "data": payload})
         except Exception:
             frontend_clients.discard(ws)
@@ -490,141 +501,6 @@ async def _remove_process_manager_watcher(ws: WebSocket, agent_id: str):
 
 async def _remove_all_process_manager_watchers(ws: WebSocket):
     await _get_process_monitoring_handler().remove_all_watchers(ws)
-
-# --- REST API for historical data ---
-
-@app.get("/api/metrics")
-async def api_metrics(
-    agent_id: str,
-    request: Request,
-    pid: int = None,
-    from_ts: int = None,
-    to_ts: int = None,
-    limit: int = Query(default=50000, le=100000)
-):
-    if not request_has_minimum_role(request, "viewer"):
-        return role_required_response("viewer")
-    rows = await telemetry_db.get_metrics(agent_id, pid, from_ts, to_ts, limit)
-    return JSONResponse(rows)
-
-
-@app.get("/api/events")
-async def api_events(
-    request: Request,
-    agent_id: str = None,
-    event_type: str = None,
-    from_ts: int = None,
-    to_ts: int = None,
-    limit: int = Query(default=200, le=5000)
-):
-    if not request_has_minimum_role(request, "viewer"):
-        return role_required_response("viewer")
-    rows = await telemetry_db.get_events(agent_id, event_type, from_ts, to_ts, limit)
-    return JSONResponse(rows)
-
-
-@app.get("/api/agents/summary")
-async def api_agents_summary(request: Request):
-    if not request_has_minimum_role(request, "viewer"):
-        return role_required_response("viewer")
-    rows = await telemetry_db.get_agents_summary()
-    return JSONResponse(rows)
-
-
-@app.get("/api/agents/{agent_id}")
-async def api_agent_state(agent_id: str, request: Request):
-    if not request_has_minimum_role(request, "viewer"):
-        return role_required_response("viewer")
-    state = agent_runtime.get_agent_state(agent_id)
-    if state is None:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    return JSONResponse(state)
-
-
-@app.get("/api/agent-registry")
-async def api_agent_registry(request: Request, limit: int = Query(default=200, le=500)):
-    if not request_has_minimum_role(request, "viewer"):
-        return role_required_response("viewer")
-    return JSONResponse(await registry_db.get_agents(limit))
-
-
-@app.get("/api/agent-registry/{agent_id}")
-async def api_agent_registry_item(agent_id: str, request: Request):
-    if not request_has_minimum_role(request, "viewer"):
-        return role_required_response("viewer")
-    item = await registry_db.get_agent(agent_id)
-    if not item:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    return JSONResponse(item)
-
-
-@app.patch("/api/agent-registry/{agent_id}")
-async def api_update_agent_registry_item(agent_id: str, body: AgentRegistryUpdateRequest, request: Request):
-    if not request_has_minimum_role(request, "admin"):
-        return role_required_response("admin")
-
-    existing = await registry_db.get_agent(agent_id)
-    if not existing:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-
-    hostname = body.hostname.strip() if isinstance(body.hostname, str) else ""
-    display_name = body.display_name.strip() if isinstance(body.display_name, str) else ""
-    metadata = None
-    if body.guacamole_access is not None:
-        metadata = {
-            "guacamole": {
-                "access": body.guacamole_access.model_dump(mode="python", exclude_none=True),
-            },
-        }
-
-    await registry_db.upsert_agent(agent_id, hostname=hostname, display_name=display_name, metadata=metadata)
-    updated = await registry_db.get_agent(agent_id)
-
-    if updated:
-        updated_metadata = updated.get("metadata") if isinstance(updated.get("metadata"), dict) else {}
-        guacamole_mapping = updated_metadata.get("guacamole") if isinstance(updated_metadata.get("guacamole"), dict) else {}
-        if guacamole_mapping:
-            provision_hostname = str(updated.get("hostname") or guacamole_mapping.get("target_host") or agent_id).strip() or agent_id
-            try:
-                refreshed_mapping, _ = await asyncio.to_thread(
-                    provision_guacamole_agent_target_with_diagnostics,
-                    agent_id,
-                    provision_hostname,
-                    guacamole_mapping,
-                )
-                await registry_db.upsert_agent(agent_id, metadata={"guacamole": refreshed_mapping})
-                updated = await registry_db.get_agent(agent_id)
-            except Exception as error:
-                logger.warning("Failed to reprovision Guacamole connection for agent %s after registry update: %s", agent_id, error)
-
-    return JSONResponse(updated or {"id": agent_id})
-
-
-@app.delete("/api/agent-registry/{agent_id}")
-async def api_delete_agent_registry_item(agent_id: str, request: Request):
-    if not request_has_minimum_role(request, "admin"):
-        return role_required_response("admin")
-
-    existing = await registry_db.get_agent(agent_id)
-    if not existing:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-
-    await agent_runtime.timeout_agent(agent_id)
-    agent_runtime.remove_agent(agent_id)
-    await registry_db.delete_agent(agent_id)
-    frontend_snapshot_event.set()
-    return JSONResponse({"deleted": True, "agent_id": agent_id})
-
-
-@app.post("/api/agent-registry/{agent_id}/rotate-token", response_model=AgentTokenRotationResponse)
-async def api_rotate_agent_token(agent_id: str, request: Request):
-    if not request_has_minimum_role(request, "admin"):
-        return role_required_response("admin")
-    rotated = await registry_db.rotate_agent_token_version(agent_id)
-    if not rotated:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    return {"ok": True, **rotated}
-
 
 def _resolve_agent_ws_url(request: Request) -> str:
     override = os.getenv("VM_AGENT_SERVER_WS_URL")
@@ -721,6 +597,16 @@ def _proxy_guacamole_tunnel_request(method: str, raw_query: str, body: bytes, he
 
 
 app.include_router(build_task_router(task_service, task_db, _send_to_agent))
+app.include_router(
+    build_agent_runtime_router(
+        telemetry_db,
+        registry_db,
+        agent_runtime,
+        frontend_snapshot_event,
+        provision_guacamole_agent_target_with_diagnostics,
+        logger,
+    )
+)
 app.include_router(build_deployment_router(deployment_service, registry_db, _resolve_agent_ws_url))
 app.include_router(build_users_router(server_settings_service, user_service, _resolve_public_base_url))
 app.include_router(build_settings_router(server_settings_service, user_service))
