@@ -43,7 +43,8 @@ export function MonitoredView({ state }: MonitoredViewProps) {
 
   for (const [sessionKey, session] of getAgentSessions(state)) {
     for (const [pid, proc] of Object.entries(session.processes || {})) {
-      if (proc.is_monitored || proc.args?.includes("--agent_id_1234")) {
+      const commandLine = proc.cmd || proc.args || "";
+      if (proc.is_monitored || commandLine.includes("--agent_id_1234")) {
         monitored.push({
           sessionKey,
           username: session.username,
@@ -135,9 +136,9 @@ export function MonitoredView({ state }: MonitoredViewProps) {
                 </div>
               </div>
 
-              {entry.proc.args && (
-                <p className="mt-2 text-xs text-slate-600 font-mono truncate" title={entry.proc.args}>
-                  {entry.proc.args}
+              {(entry.proc.cmd || entry.proc.args) && (
+                <p className="mt-2 text-xs text-slate-600 font-mono truncate" title={entry.proc.cmd || entry.proc.args}>
+                  {entry.proc.cmd || entry.proc.args}
                 </p>
               )}
             </div>
