@@ -62,7 +62,7 @@ export function AgentDetail({ agentId, state, tasks, canOperate, canManageAccess
   // Count monitored processes
   const monitoredCount = sessions.reduce((sum, [, s]) => {
     return sum + Object.values(s.processes || {}).filter(
-      (p) => p.is_monitored || p.args?.includes("--agent_id_1234")
+      (p) => p.is_monitored || (p.cmd || p.args || "").includes("--agent_id_1234")
     ).length;
   }, 0);
 
