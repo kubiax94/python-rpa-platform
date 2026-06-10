@@ -34,6 +34,26 @@ def has_minimum_role(roles: Iterable[str] | None, minimum_role: str) -> bool:
     return ROLE_ORDER[get_highest_role(roles)] >= minimum
 
 
+def user_has_agent_visibility(user) -> bool:
+    if user is None:
+        return False
+    return str(getattr(user, "agent_visibility", "all") or "all").strip().lower() != "none"
+
+
+def request_has_agent_visibility(request: Request) -> bool:
+    session = getattr(request.state, "user_session", None)
+    if session is None:
+        return False
+    return user_has_agent_visibility(getattr(session, "user", None))
+
+
+def websocket_has_agent_visibility(ws: WebSocket) -> bool:
+    session = getattr(ws.state, "user_session", None)
+    if session is None:
+        return False
+    return user_has_agent_visibility(getattr(session, "user", None))
+
+
 def request_has_minimum_role(request: Request, minimum_role: str) -> bool:
     session = getattr(request.state, "user_session", None)
     if session is None:
