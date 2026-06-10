@@ -79,6 +79,12 @@ export interface ServerSettings {
     provider_locked: boolean;
     local_bootstrap_available: boolean;
     session_ttl_seconds: number;
+    access: {
+      mode: "allow_all" | "deny_unlisted" | "allow_limited";
+      allow_mapped_groups: boolean;
+      allowed_user_subjects: string[];
+      allowed_group_ids: string[];
+    };
     azure: {
       tenant_id: string;
       client_id: string;
@@ -118,6 +124,12 @@ export interface ServerSettings {
 
 export interface IdentitySettingsUpdate {
   session_ttl_seconds?: number;
+  access?: {
+    mode?: "allow_all" | "deny_unlisted" | "allow_limited";
+    allow_mapped_groups?: boolean;
+    allowed_user_subjects?: string[];
+    allowed_group_ids?: string[];
+  };
   azure?: {
     tenant_id?: string;
     client_id?: string;
@@ -188,6 +200,26 @@ export async function fetchServerSettings(): Promise<ServerSettings> {
 
 export async function updateServerSettings(body: ServerSettingsUpdate): Promise<ServerSettings> {
   return patchJSON<ServerSettings>(`${API_BASE}/api/settings/server`, body);
+}
+
+export interface RecentUserIdentity {
+  subject: string;
+  username: string;
+  display_name: string;
+  email: string;
+  avatar_url: string;
+  avatar_initials: string;
+  auth_provider: string;
+  roles: string[];
+  group_ids: string[];
+  group_names: string[];
+  last_seen_at: number;
+}
+
+export async function fetchRecentUsers(limit = 100): Promise<RecentUserIdentity[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetchJSON<{ items: RecentUserIdentity[] }>(`${API_BASE}/api/users/recent?${params}`);
+  return response.items || [];
 }
 
 export function getDeploymentInstallerUrl(deploymentId: string): string {
