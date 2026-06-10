@@ -10,6 +10,7 @@ from vm_agent_server.src.settings.models import (
     DeploymentDefaultsPatch,
     GuacamoleSettingsPatch,
     GuacamoleRecordingSettingsPatch,
+    IdentityAccessSettingsPatch,
     IdentitySettingsPatch,
     ServerSettings,
     ServerSettingsPatch,
@@ -42,6 +43,7 @@ def build_settings_router(server_settings_service: ServerSettingsService, user_s
         if body.identity:
             requested_identity_patch = IdentitySettingsPatch(
                 session_ttl_seconds=body.identity.session_ttl_seconds,
+                access=(IdentityAccessSettingsPatch.model_validate(body.identity.access.model_dump(exclude_none=True)) if body.identity.access else None),
                 azure=(AzureSsoPatch.model_validate(body.identity.azure.model_dump(exclude_none=True)) if body.identity.azure else None),
             )
             identity_patch = user_service.prepare_identity_patch(current_settings.identity, requested_identity_patch)
