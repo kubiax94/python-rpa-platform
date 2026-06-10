@@ -5,6 +5,7 @@ import logging
 from fastapi import WebSocket, WebSocketDisconnect
 
 from shared.network.events import parse as parse_network_event
+from vm_agent_server.src.authz import websocket_has_agent_visibility
 from vm_agent_server.src.network.context import AgentCommandContext, FrontendSessionDependencies
 from vm_agent_server.src.network.event_router import EventRouter
 
@@ -21,7 +22,8 @@ async def run_frontend_ws_session(ws: WebSocket, auth_payload: dict[str, object]
     deps.frontend_clients.add(ws)
     deps.frontend_watched_agents[ws] = set()
     if deps.agent_runtime.latest_stats:
-        await ws.send_json({"kind": "agents_snapshot", "data": deps.agent_runtime.build_frontend_snapshot()})
+        snapshot = deps.agent_runtime.build_frontend_snapshot() if websocket_has_agent_visibility(ws) else {}
+        await ws.send_json({"kind": "agents_snapshot", "data": snapshot})
 
     process_monitoring_handler = deps.create_process_monitoring_handler()
     agent_command_context = AgentCommandContext(
