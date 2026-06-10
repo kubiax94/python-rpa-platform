@@ -24,6 +24,15 @@ class IdentityGroupRoleMapping(BaseModel):
     app_roles: list[str] = Field(default_factory=list)
 
 
+class IdentityAccessSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    mode: Literal["allow_all", "deny_unlisted", "allow_limited"] = "allow_all"
+    allow_mapped_groups: bool = True
+    allowed_user_subjects: list[str] = Field(default_factory=list)
+    allowed_group_ids: list[str] = Field(default_factory=list)
+
+
 class AzureSsoSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -43,6 +52,7 @@ class IdentitySettings(BaseModel):
     provider: Literal["local_bootstrap", "azure_entra"] = "local_bootstrap"
     provider_locked: bool = False
     session_ttl_seconds: int = 43200
+    access: IdentityAccessSettings = IdentityAccessSettings()
     azure: AzureSsoSettings = AzureSsoSettings()
 
 
@@ -100,6 +110,15 @@ class IdentityGroupRoleMappingPatch(BaseModel):
     app_roles: list[str] | None = None
 
 
+class IdentityAccessSettingsPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    mode: Literal["allow_all", "deny_unlisted", "allow_limited"] | None = None
+    allow_mapped_groups: bool | None = None
+    allowed_user_subjects: list[str] | None = None
+    allowed_group_ids: list[str] | None = None
+
+
 class AzureSsoPatch(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -117,6 +136,7 @@ class IdentitySettingsPatch(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     session_ttl_seconds: int | None = None
+    access: IdentityAccessSettingsPatch | None = None
     azure: AzureSsoPatch | None = None
 
 
