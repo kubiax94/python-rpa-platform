@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/kubiax94/python-rpa-platform/compare/v0.11.0...v0.11.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* **settings:** removed no existing oid varible ([ef309f2](https://github.com/kubiax94/python-rpa-platform/commit/ef309f23c6f2dff9ebaed0b525e8e4c8a5a9f2b2))
+
 ## [0.11.0](https://github.com/kubiax94/python-rpa-platform/compare/v0.10.0...v0.11.0) (2026-06-10)
 
 
