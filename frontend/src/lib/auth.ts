@@ -38,6 +38,7 @@ export interface AuthUser {
   avatar_initials: string;
   auth_provider: string;
   roles: string[];
+  agent_visibility: "all" | "none";
   group_ids: string[];
   group_names: string[];
   claims: Record<string, unknown>;
