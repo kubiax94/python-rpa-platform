@@ -114,7 +114,8 @@ function ProcessTreeRow({
 }) {
   const [expanded, setExpanded] = useState(true);
   const status = resolveStatus(node.proc);
-  const isMonitored = node.proc.is_monitored || node.proc.args?.includes("--agent_id_1234");
+  const commandLine = node.proc.cmd || node.proc.args || "";
+  const isMonitored = node.proc.is_monitored || commandLine.includes("--agent_id_1234");
   const hasChildren = node.children.length > 0;
   const rowRef = useRef<HTMLDivElement | null>(null);
   const isHighlighted =
@@ -179,9 +180,9 @@ function ProcessTreeRow({
                 <span className="shrink-0 font-mono text-xs text-slate-600">PPID {node.proc.ppid}</span>
               )}
             </div>
-            {node.proc.args && (
-              <p className="truncate font-mono text-[11px] text-slate-500" title={node.proc.args}>
-                {node.proc.args}
+            {commandLine && (
+              <p className="truncate font-mono text-[11px] text-slate-500" title={commandLine}>
+                {commandLine}
               </p>
             )}
             {windowHint && (
