@@ -739,7 +739,7 @@ export function SettingsPage() {
                         className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 outline-none focus:border-cyan-500"
                         placeholder="microsoft:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
                       />
-                      <span className="mt-1 block text-xs text-slate-500">One subject per line, using the stored session subject format, for example `microsoft:{oid}`.</span>
+                      <span className="mt-1 block text-xs text-slate-500">One subject per line, using the stored session subject format, for example microsoft:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.</span>
                     </label>
 
                     <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-sm xl:row-span-2">
