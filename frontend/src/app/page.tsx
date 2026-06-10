@@ -316,6 +316,12 @@ function DashboardShell({ session, onLogout, socketEnabled }: { session: AuthSes
       />
 
       <main className="flex-1 overflow-y-auto p-6">
+        {session.user.agent_visibility === "none" && (
+          <div className="mb-4 rounded-2xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+            This account is signed in, but current access policy hides all agents and agent-bound data for unlisted users.
+          </div>
+        )}
+
         {activePage === "agents" && !selectedAgent && (
           <AgentList
             agents={agents}
