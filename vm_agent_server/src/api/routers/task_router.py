@@ -11,7 +11,7 @@ from shared.network.events.example_event import CancelTaskData, CancelTaskEvent
 from vm_agent_server.src.api.schemas.query_params import AuditLogQuery, PipelineListQuery, TaskListQuery, TaskLogQuery
 from vm_agent_server.src.api.schemas.task_responses import AuditEntryResponse, PipelineResponse, PipelineRunLaunchResponse, PipelineRunResponse, TaskCancelResponse, TaskLogResponse, TaskResponse
 from vm_agent_server.src.api.schemas.task_requests import CreatePipelineRequest, CreateTaskRequest, RunPipelineRequest
-from vm_agent_server.src.authz import request_has_minimum_role, role_required_response
+from vm_agent_server.src.authz import request_has_agent_visibility, request_has_minimum_role, role_required_response
 from vm_agent_server.src.tasks.db import TaskDB
 from vm_agent_server.src.tasks.factory import TaskFactory
 from vm_agent_server.src.tasks.service import TaskService
@@ -32,11 +32,15 @@ def build_task_router(task_service: TaskService, task_db: TaskDB, send_to_agent:
         return submission.task
 
     @router.get("/tasks", response_model=list[TaskResponse])
-    async def api_list_tasks(query: Annotated[TaskListQuery, Depends()]):
+    async def api_list_tasks(query: Annotated[TaskListQuery, Depends()], request: Request):
+        if not request_has_agent_visibility(request):
+            return []
         return await task_db.get_tasks(query.agent_id, query.status, query.limit)
 
     @router.get("/tasks/{task_id}", response_model=TaskResponse)
-    async def api_get_task(task_id: str):
+    async def api_get_task(task_id: str, request: Request):
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "Not found"}, status_code=404)
         task = await task_db.get_task(task_id)
         if not task:
             return JSONResponse({"error": "Not found"}, status_code=404)
@@ -46,6 +50,8 @@ def build_task_router(task_service: TaskService, task_db: TaskDB, send_to_agent:
     async def api_cancel_task(task_id: str, request: Request):
         if not request_has_minimum_role(request, "operator"):
             return role_required_response("operator")
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "Not found"}, status_code=404)
         task = await task_db.get_task(task_id)
         if not task:
             return JSONResponse({"error": "Not found"}, status_code=404)
@@ -58,11 +64,15 @@ def build_task_router(task_service: TaskService, task_db: TaskDB, send_to_agent:
         return {"ok": True, "sent": sent}
 
     @router.get("/tasks/{task_id}/log", response_model=TaskLogResponse)
-    async def api_task_log(task_id: str, query: Annotated[TaskLogQuery, Depends()]):
+    async def api_task_log(task_id: str, query: Annotated[TaskLogQuery, Depends()], request: Request):
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "Not found"}, status_code=404)
         return task_db.read_log(task_id, query.offset, query.limit)
 
     @router.get("/tasks/{task_id}/log/raw")
-    async def api_task_log_raw(task_id: str):
+    async def api_task_log_raw(task_id: str, request: Request):
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "Not found"}, status_code=404)
         result = task_db.read_log(task_id)
         return PlainTextResponse(result["content"], media_type="text/plain")
 
@@ -94,6 +104,8 @@ def build_task_router(task_service: TaskService, task_db: TaskDB, send_to_agent:
     async def api_run_pipeline(pipeline_id: str, body: RunPipelineRequest, request: Request):
         if not request_has_minimum_role(request, "operator"):
             return role_required_response("operator")
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "No visible agents available"}, status_code=403)
         requested_from = request.client.host if request.client else ""
 
         pipeline = await task_db.get_pipeline(pipeline_id)
@@ -123,7 +135,9 @@ def build_task_router(task_service: TaskService, task_db: TaskDB, send_to_agent:
         return {"run_id": run_id, "task_id": first_task.id, "sent": submission.dispatch.accepted}
 
     @router.get("/pipeline-runs/{run_id}", response_model=PipelineRunResponse)
-    async def api_get_pipeline_run(run_id: str):
+    async def api_get_pipeline_run(run_id: str, request: Request):
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "Not found"}, status_code=404)
         run = await task_db.get_pipeline_run(run_id)
         if not run:
             return JSONResponse({"error": "Not found"}, status_code=404)
