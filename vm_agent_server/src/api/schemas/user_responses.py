@@ -10,9 +10,24 @@ class UserIdentityResponse(ApiResponseModel):
     email: str = ""
     auth_provider: str
     roles: list[str] = []
+    agent_visibility: str = "all"
     group_ids: list[str] = []
     group_names: list[str] = []
     claims: dict[str, object] = {}
+
+
+class RecentUserIdentityResponse(ApiResponseModel):
+    subject: str
+    username: str
+    display_name: str = ""
+    email: str = ""
+    avatar_url: str = ""
+    avatar_initials: str = ""
+    auth_provider: str
+    roles: list[str] = []
+    group_ids: list[str] = []
+    group_names: list[str] = []
+    last_seen_at: int = 0
 
 
 class UserSessionResponse(ApiResponseModel):
@@ -40,3 +55,7 @@ class BeginMicrosoftLoginResponse(ApiResponseModel):
 
 class LogoutResponse(ApiResponseModel):
     ok: bool
+
+
+class RecentUsersResponse(ApiResponseModel):
+    items: list[RecentUserIdentityResponse] = []
