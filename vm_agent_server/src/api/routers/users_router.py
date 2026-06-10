@@ -8,6 +8,7 @@ from vm_agent_server.src.api.schemas.user_responses import (
     BeginMicrosoftLoginResponse,
     LogoutResponse,
     PublicAuthConfigResponse,
+    RecentUsersResponse,
     UserSessionResponse,
 )
 from vm_agent_server.src.users.service import UserService
@@ -62,6 +63,13 @@ def build_users_router(
         if session is None:
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         return session.model_dump(mode="json")
+
+    @router.get("/users/recent", response_model=RecentUsersResponse)
+    async def api_recent_users(request: Request, limit: int = Query(default=100, ge=1, le=500)):
+        session = getattr(request.state, "user_session", None)
+        if session is None or "admin" not in set(session.user.roles):
+            return JSONResponse({"error": "Admin role required"}, status_code=403)
+        return {"items": [item.model_dump(mode="json") for item in await user_service.list_recent_identities(limit)]}
 
     @router.post("/users/logout", response_model=LogoutResponse)
     async def api_user_logout(request: Request):
