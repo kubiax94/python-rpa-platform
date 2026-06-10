@@ -15,6 +15,13 @@ class IdentityGroupRoleMappingResponse(ApiResponseModel):
     app_roles: list[str] = []
 
 
+class IdentityAccessSettingsResponse(ApiResponseModel):
+    mode: str = "allow_all"
+    allow_mapped_groups: bool = True
+    allowed_user_subjects: list[str] = []
+    allowed_group_ids: list[str] = []
+
+
 class AzureSsoSettingsResponse(ApiResponseModel):
     tenant_id: str = ""
     client_id: str = ""
@@ -32,6 +39,7 @@ class IdentitySettingsResponse(ApiResponseModel):
     provider_locked: bool = False
     session_ttl_seconds: int = 43200
     local_bootstrap_available: bool = False
+    access: IdentityAccessSettingsResponse = IdentityAccessSettingsResponse()
     azure: AzureSsoSettingsResponse = AzureSsoSettingsResponse()
 
 
