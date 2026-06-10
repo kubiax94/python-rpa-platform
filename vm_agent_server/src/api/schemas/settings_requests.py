@@ -17,6 +17,13 @@ class IdentityGroupRoleMappingRequest(ApiRequestModel):
     app_roles: list[str] | None = None
 
 
+class IdentityAccessSettingsPatchRequest(ApiRequestModel):
+    mode: str | None = Field(default=None, pattern="^(allow_all|deny_unlisted|allow_limited)$")
+    allow_mapped_groups: bool | None = None
+    allowed_user_subjects: list[str] | None = None
+    allowed_group_ids: list[str] | None = None
+
+
 class AzureSsoPatchRequest(ApiRequestModel):
     tenant_id: str | None = None
     client_id: str | None = None
@@ -30,6 +37,7 @@ class AzureSsoPatchRequest(ApiRequestModel):
 
 class IdentitySettingsPatchRequest(ApiRequestModel):
     session_ttl_seconds: int | None = Field(default=None, ge=900, le=604800)
+    access: IdentityAccessSettingsPatchRequest | None = None
     azure: AzureSsoPatchRequest | None = None
 
 
