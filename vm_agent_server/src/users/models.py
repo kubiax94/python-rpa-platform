@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,9 +18,26 @@ class UserIdentity(BaseModel):
     avatar_initials: str = ""
     auth_provider: str
     roles: list[str] = Field(default_factory=list)
+    agent_visibility: Literal["all", "none"] = "all"
     group_ids: list[str] = Field(default_factory=list)
     group_names: list[str] = Field(default_factory=list)
     claims: dict[str, Any] = Field(default_factory=dict)
+
+
+class RecentUserIdentity(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    subject: str
+    username: str
+    display_name: str = ""
+    email: str = ""
+    avatar_url: str = ""
+    avatar_initials: str = ""
+    auth_provider: str
+    roles: list[str] = Field(default_factory=list)
+    group_ids: list[str] = Field(default_factory=list)
+    group_names: list[str] = Field(default_factory=list)
+    last_seen_at: int = Field(default_factory=lambda: int(time.time()))
 
 
 class UserSession(BaseModel):
