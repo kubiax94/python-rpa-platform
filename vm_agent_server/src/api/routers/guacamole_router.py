@@ -8,7 +8,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vm_agent_server.src.api.schemas.deployment_responses import GenericStatusResponse, GuacamoleConfigResponse, GuacamoleRecordingsResponse, GuacamoleSessionStatusResponse
-from vm_agent_server.src.authz import has_minimum_role, request_has_minimum_role, role_required_response
+from vm_agent_server.src.authz import has_minimum_role, request_has_agent_visibility, request_has_minimum_role, role_required_response
 from vm_agent_server.src.guacamole.access_policy import attach_effective_permissions, extract_guacamole_access_policy, has_guacamole_permission
 from vm_agent_server.src.guacamole.bridge import list_guacamole_recordings, list_vm_user_sessions, open_guacamole_recording
 from vm_agent_server.src.services.guacamole_service import GuacamoleService
@@ -76,6 +76,8 @@ def build_guacamole_router(
     ):
         if not request_has_minimum_role(request, "viewer"):
             return role_required_response("viewer")
+        if not request_has_agent_visibility(request):
+            return {"entries": [], "browse_url": "", "configured": False}
         payload = await asyncio.to_thread(
             list_guacamole_recordings,
             resolve_public_base_url(request),
@@ -88,6 +90,8 @@ def build_guacamole_router(
     async def api_guacamole_recording_download(request: Request, path: str = Query("")):
         if not request_has_minimum_role(request, "viewer"):
             return role_required_response("viewer")
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "Not found"}, status_code=404)
         try:
             upstream = await asyncio.to_thread(open_guacamole_recording, path)
         except HTTPError as error:
@@ -131,6 +135,8 @@ def build_guacamole_router(
 
     @router.get("/agents/{agent_id}/guacamole")
     async def api_agent_guacamole(agent_id: str, request: Request):
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "Not found"}, status_code=404)
         state = await build_agent_context(agent_id)
         if state is None:
             return JSONResponse({"error": "Not found"}, status_code=404)
@@ -143,6 +149,8 @@ def build_guacamole_router(
     async def api_agent_guacamole_user_sessions(agent_id: str, request: Request):
         if not request_has_minimum_role(request, "viewer"):
             return role_required_response("viewer")
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "Not found"}, status_code=404)
         state = await build_agent_context(agent_id)
         if state is None:
             return JSONResponse({"error": "Not found"}, status_code=404)
@@ -186,6 +194,8 @@ def build_guacamole_router(
         read_only: bool = Query(False),
         recorded: bool = Query(False),
     ):
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "Not found"}, status_code=404)
         state = await build_agent_context(agent_id)
         if state is None:
             return JSONResponse({"error": "Not found"}, status_code=404)
@@ -219,6 +229,8 @@ def build_guacamole_router(
 
     @router.post("/agents/{agent_id}/guacamole/tracked-sessions/{owner_subject}/kick", response_model=GenericStatusResponse)
     async def api_agent_guacamole_kick_owner_session(agent_id: str, owner_subject: str, request: Request):
+        if not request_has_agent_visibility(request):
+            return JSONResponse({"error": "Not found"}, status_code=404)
         state = await build_agent_context(agent_id)
         if state is None:
             return JSONResponse({"error": "Not found"}, status_code=404)
