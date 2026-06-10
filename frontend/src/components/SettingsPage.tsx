@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { GuacamoleRecordingPlayerDialog } from "@/components/GuacamoleRecordingPlayerDialog";
 import {
   killAllTrackedGuacamoleSessions,
@@ -12,10 +12,32 @@ import {
 } from "@/hooks/useGuacamole";
 import { describeFrontendWebSocketUrl, withAccessToken } from "@/lib/auth";
 import { formatRoleLabel, getHighestRole, type AppRole } from "@/lib/rbac";
-import { updateServerSettings, useServerSettings } from "@/hooks/useDeploymentAPI";
+import { fetchRecentUsers, updateServerSettings, useServerSettings, type RecentUserIdentity } from "@/hooks/useDeploymentAPI";
 
 type SettingsSection = "general" | "identity" | "guacamole";
 const APP_ROLE_OPTIONS: AppRole[] = ["viewer", "operator", "admin"];
+
+function describeIdentityAccessMode(mode: "allow_all" | "deny_unlisted" | "allow_limited"): { label: string; detail: string; accent: "emerald" | "amber" | "cyan" } {
+  if (mode === "deny_unlisted") {
+    return {
+      label: "Deny unlisted",
+      detail: "Only explicit allowlists or mapped groups can sign in.",
+      accent: "amber",
+    };
+  }
+  if (mode === "allow_limited") {
+    return {
+      label: "Allow limited",
+      detail: "Unlisted users can sign in, but they see no agents or agent-bound data.",
+      accent: "cyan",
+    };
+  }
+  return {
+    label: "Allow all",
+    detail: "Any authenticated Entra user can sign in.",
+    accent: "emerald",
+  };
+}
 
 function formatDateTime(value?: number | null): string {
   if (!value) {
@@ -192,6 +214,8 @@ export function SettingsPage() {
     refresh: refreshRecordings,
   } = useGuacamoleRecordings();
   const { data: serverSettings, loading: settingsLoading, refresh: refreshServerSettings } = useServerSettings();
+  const [recentUsers, setRecentUsers] = useState<RecentUserIdentity[]>([]);
+  const [recentUsersLoading, setRecentUsersLoading] = useState(true);
   const [draftDeployment, setDraftDeployment] = useState<null | {
     default_repo_url: string;
     artifact_share_root: string;
@@ -202,6 +226,12 @@ export function SettingsPage() {
     provider_locked: boolean;
     local_bootstrap_available: boolean;
     session_ttl_seconds: number;
+    access: {
+      mode: "allow_all" | "deny_unlisted" | "allow_limited";
+      allow_mapped_groups: boolean;
+      allowed_user_subjects: string[];
+      allowed_group_ids: string[];
+    };
     azure: {
       tenant_id: string;
       client_id: string;
@@ -248,6 +278,31 @@ export function SettingsPage() {
   const [killMessage, setKillMessage] = useState<string | null>(null);
   const [playbackEntry, setPlaybackEntry] = useState<GuacamoleRecordingEntry | null>(null);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchRecentUsers(100)
+      .then((items) => {
+        if (!cancelled) {
+          setRecentUsers(items);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error("[SettingsPage] Failed to load recent users", error);
+          setRecentUsers([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setRecentUsersLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const deploymentSettings = draftDeployment ?? serverSettings?.deployment ?? {
     default_repo_url: "",
     artifact_share_root: "",
@@ -258,6 +313,12 @@ export function SettingsPage() {
     provider_locked: serverSettings?.identity.provider_locked ?? false,
     local_bootstrap_available: serverSettings?.identity.local_bootstrap_available ?? false,
     session_ttl_seconds: serverSettings?.identity.session_ttl_seconds ?? 43200,
+    access: {
+      mode: serverSettings?.identity.access.mode ?? "allow_all",
+      allow_mapped_groups: serverSettings?.identity.access.allow_mapped_groups ?? true,
+      allowed_user_subjects: serverSettings?.identity.access.allowed_user_subjects ?? [],
+      allowed_group_ids: serverSettings?.identity.access.allowed_group_ids ?? [],
+    },
     azure: {
       tenant_id: serverSettings?.identity.azure.tenant_id ?? "",
       client_id: serverSettings?.identity.azure.client_id ?? "",
@@ -293,6 +354,7 @@ export function SettingsPage() {
 
   const providerLocked = identitySettings.provider_locked;
   const azureActive = identitySettings.azure.active;
+  const accessModeSummary = describeIdentityAccessMode(identitySettings.access.mode);
 
   const trackedCount = trackedSessions?.tracked_count ?? 0;
   const connectionCount = guacamoleConnections?.connection_count ?? 0;
@@ -494,6 +556,12 @@ export function SettingsPage() {
                   detail="Each Azure group object ID resolves to one effective app role on sign-in."
                 />
                 <MetricCard
+                  label="Access Mode"
+                  value={accessModeSummary.label}
+                  accent={accessModeSummary.accent}
+                  detail={accessModeSummary.detail}
+                />
+                <MetricCard
                   label="Session TTL"
                   value={formatDuration(identitySettings.session_ttl_seconds)}
                   detail="User session lifetime for dashboard bearer tokens."
@@ -615,6 +683,137 @@ export function SettingsPage() {
                 </label>
 
                 <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-100">Application Access Gate</p>
+                    <p className="mt-1 text-xs text-slate-500">Choose whether unlisted Entra users are fully allowed, denied, or allowed to sign in with no agent visibility.</p>
+                  </div>
+
+                  <div className="mt-4 grid gap-4 xl:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-slate-300">Access Mode</span>
+                      <select
+                        value={identitySettings.access.mode}
+                        onChange={(event) => setDraftIdentity((current) => ({
+                          ...(current ?? identitySettings),
+                          access: {
+                            ...(current?.access ?? identitySettings.access),
+                            mode: event.target.value as "allow_all" | "deny_unlisted" | "allow_limited",
+                          },
+                        }))}
+                        className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
+                      >
+                        <option value="allow_all">Allow all authenticated users</option>
+                        <option value="deny_unlisted">Deny unlisted users at sign-in</option>
+                        <option value="allow_limited">Allow unlisted users but show no agents</option>
+                      </select>
+                    </label>
+
+                    <label className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-200">
+                      <input
+                        type="checkbox"
+                        checked={identitySettings.access.allow_mapped_groups}
+                        onChange={(event) => setDraftIdentity((current) => ({
+                          ...(current ?? identitySettings),
+                          access: {
+                            ...(current?.access ?? identitySettings.access),
+                            allow_mapped_groups: event.target.checked,
+                          },
+                        }))}
+                        className="h-4 w-4 rounded border-slate-600 bg-slate-950 text-cyan-400"
+                      />
+                      <span>Allow users matched by Azure group-role mappings</span>
+                    </label>
+
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-slate-300">Allowed User Subjects</span>
+                      <textarea
+                        value={identitySettings.access.allowed_user_subjects.join("\n")}
+                        onChange={(event) => setDraftIdentity((current) => ({
+                          ...(current ?? identitySettings),
+                          access: {
+                            ...(current?.access ?? identitySettings.access),
+                            allowed_user_subjects: Array.from(new Set(event.target.value.split(/[\n,;]/).map((entry) => entry.trim()).filter(Boolean))),
+                          },
+                        }))}
+                        rows={5}
+                        className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 outline-none focus:border-cyan-500"
+                        placeholder="microsoft:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                      />
+                      <span className="mt-1 block text-xs text-slate-500">One subject per line, using the stored session subject format, for example `microsoft:{oid}`.</span>
+                    </label>
+
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-sm xl:row-span-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-100">Known Users From Recent Sign-ins</p>
+                          <p className="mt-1 text-xs text-slate-500">Use these entries to populate the subject allowlist without copying values by hand.</p>
+                        </div>
+                        <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-slate-400">
+                          {recentUsersLoading ? "loading" : `${recentUsers.length} users`}
+                        </span>
+                      </div>
+
+                      <div className="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
+                        {!recentUsersLoading && recentUsers.length === 0 && (
+                          <div className="rounded-lg border border-dashed border-slate-800 px-3 py-4 text-xs text-slate-500">
+                            No recent sign-ins recorded yet.
+                          </div>
+                        )}
+                        {recentUsers.map((user) => {
+                          const isSelected = identitySettings.access.allowed_user_subjects.includes(user.subject);
+                          const label = user.display_name || user.username || user.email || user.subject;
+                          return (
+                            <div key={user.subject} className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-medium text-slate-100">{label}</p>
+                                  <p className="truncate text-xs text-slate-500">{user.email || user.username || user.subject}</p>
+                                  <p className="mt-1 truncate font-mono text-[11px] text-slate-600">{user.subject}</p>
+                                  <p className="mt-1 text-[11px] text-slate-500">Last seen {formatDateTime(user.last_seen_at)}</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setDraftIdentity((current) => ({
+                                    ...(current ?? identitySettings),
+                                    access: {
+                                      ...(current?.access ?? identitySettings.access),
+                                      allowed_user_subjects: isSelected
+                                        ? (current?.access ?? identitySettings.access).allowed_user_subjects.filter((subject) => subject !== user.subject)
+                                        : [...(current?.access ?? identitySettings.access).allowed_user_subjects, user.subject],
+                                    },
+                                  }))}
+                                  className={`shrink-0 rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${isSelected ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-100" : "border-slate-700 bg-slate-950 text-slate-200 hover:border-slate-600"}`}
+                                >
+                                  {isSelected ? "Selected" : "Allow"}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-slate-300">Allowed Group Object IDs</span>
+                      <textarea
+                        value={identitySettings.access.allowed_group_ids.join("\n")}
+                        onChange={(event) => setDraftIdentity((current) => ({
+                          ...(current ?? identitySettings),
+                          access: {
+                            ...(current?.access ?? identitySettings.access),
+                            allowed_group_ids: Array.from(new Set(event.target.value.split(/[\n,;]/).map((entry) => entry.trim()).filter(Boolean))),
+                          },
+                        }))}
+                        rows={5}
+                        className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 outline-none focus:border-cyan-500"
+                        placeholder="11111111-2222-3333-4444-555555555555"
+                      />
+                      <span className="mt-1 block text-xs text-slate-500">One Entra group object ID per line.</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <p className="text-sm font-semibold text-slate-100">Azure Group Role Mapping</p>
@@ -640,7 +839,7 @@ export function SettingsPage() {
                   <div className="mt-4 space-y-3">
                     {identitySettings.azure.group_role_mappings.length === 0 && (
                       <div className="rounded-xl border border-dashed border-slate-800 px-4 py-5 text-sm text-slate-500">
-                        No mappings yet. Without mappings users fall back to the `viewer` role.
+                        No mappings yet. In allow-all mode, unmatched users still fall back to the `viewer` role.
                       </div>
                     )}
                     {identitySettings.azure.group_role_mappings.map((mapping, index) => (
@@ -715,6 +914,12 @@ export function SettingsPage() {
                         await updateServerSettings({
                           identity: {
                             session_ttl_seconds: identitySettings.session_ttl_seconds,
+                            access: {
+                              mode: identitySettings.access.mode,
+                              allow_mapped_groups: identitySettings.access.allow_mapped_groups,
+                              allowed_user_subjects: identitySettings.access.allowed_user_subjects,
+                              allowed_group_ids: identitySettings.access.allowed_group_ids,
+                            },
                             azure: {
                               tenant_id: identitySettings.azure.tenant_id,
                               client_id: identitySettings.azure.client_id,
@@ -753,6 +958,12 @@ export function SettingsPage() {
                         await updateServerSettings({
                           identity: {
                             session_ttl_seconds: identitySettings.session_ttl_seconds,
+                            access: {
+                              mode: identitySettings.access.mode,
+                              allow_mapped_groups: identitySettings.access.allow_mapped_groups,
+                              allowed_user_subjects: identitySettings.access.allowed_user_subjects,
+                              allowed_group_ids: identitySettings.access.allowed_group_ids,
+                            },
                             azure: {
                               tenant_id: identitySettings.azure.tenant_id,
                               client_id: identitySettings.azure.client_id,
